@@ -1,0 +1,231 @@
+import AuthenticationServices
+import Combine
+import CryptoKit
+import Foundation
+import Security
+import UIKit
+
+@MainActor
+final class ChatGPTAuthManager: NSObject, ObservableObject, ASWebAuthenticationPresentationContextProviding {
+    static let shared = ChatGPTAuthManager()
+
+    struct Credential: Codable, Sendable {
+        let accessToken: String
+        let refreshToken: String
+        let expiresAt: Date
+        let accountId: String?
+        let email: String?
+
+        var isExpiringSoon: Bool { Date().addingTimeInterval(300) >= expiresAt }
+    }
+
+    private enum Config {
+        static let clientID = "app_EMoamEEZ73f0CkXaXp7hrann"
+        static let authorizeURL = "https://auth.openai.com/oauth/authorize"
+        static let tokenURL = "https://auth.openai.com/oauth/token"
+        static let redirectURI = "http://localhost:1455/auth/callback"
+        static let scopes = "openid profile email offline_access"
+        static let keychainAccount = "openvoicetyper.gpt.oauth"
+    }
+
+    @Published private(set) var credential: Credential?
+    @Published private(set) var lastError: String?
+    private var authSession: ASWebAuthenticationSession?
+
+    override init() {
+        super.init()
+        if let data = ChatGPTKeychainStore.load(account: Config.keychainAccount),
+           let saved = try? JSONDecoder().decode(Credential.self, from: data) {
+            credential = saved
+        }
+    }
+
+    var isSignedIn: Bool { credential != nil }
+    var accountEmail: String? { credential?.email }
+
+    func signOut() {
+        credential = nil
+        lastError = nil
+        ChatGPTKeychainStore.delete(account: Config.keychainAccount)
+    }
+
+    func signIn() async {
+        do {
+            try await performSignIn()
+            lastError = nil
+        } catch {
+            lastError = error.localizedDescription
+        }
+    }
+
+    func validCredential() async throws -> Credential {
+        guard var current = credential else { throw AuthError.notSignedIn }
+        if current.isExpiringSoon {
+            guard !current.refreshToken.isEmpty else { throw AuthError.refreshUnavailable }
+            current = try await tokenRequest(fields: [
+                "grant_type": "refresh_token",
+                "client_id": Config.clientID,
+                "refresh_token": current.refreshToken
+            ], existingRefreshToken: current.refreshToken)
+            try save(current)
+            credential = current
+        }
+        return current
+    }
+
+    private func performSignIn() async throws {
+        let verifier = Self.randomURLSafeString(byteCount: 32)
+        let challenge = Self.base64URL(Data(SHA256.hash(data: Data(verifier.utf8))))
+        let state = Self.randomURLSafeString(byteCount: 24)
+
+        guard var components = URLComponents(string: Config.authorizeURL) else { throw AuthError.invalidURL }
+        components.queryItems = [
+            URLQueryItem(name: "response_type", value: "code"),
+            URLQueryItem(name: "client_id", value: Config.clientID),
+            URLQueryItem(name: "redirect_uri", value: Config.redirectURI),
+            URLQueryItem(name: "scope", value: Config.scopes),
+            URLQueryItem(name: "state", value: state),
+            URLQueryItem(name: "code_challenge", value: challenge),
+            URLQueryItem(name: "code_challenge_method", value: "S256"),
+            URLQueryItem(name: "codex_cli_simplified_flow", value: "true"),
+            URLQueryItem(name: "id_token_add_organizations", value: "true")
+        ]
+        guard let authorizationURL = components.url else { throw AuthError.invalidURL }
+
+        let listener = try await OAuthCallbackServer().start()
+        defer { listener.cancel() }
+
+        let callbackURL = try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<URL, Error>) in
+            let session = ASWebAuthenticationSession(
+                url: authorizationURL,
+                callbackURLScheme: "openvoicetyper"
+            ) { url, error in
+                if let error { continuation.resume(throwing: error) }
+                else if let url { continuation.resume(returning: url) }
+                else { continuation.resume(throwing: AuthError.missingCallback) }
+            }
+            session.presentationContextProvider = self
+            session.prefersEphemeralWebBrowserSession = false
+            self.authSession = session
+            session.start()
+        }
+        authSession = nil
+
+        guard let callback = URLComponents(url: callbackURL, resolvingAgainstBaseURL: false) else {
+            throw AuthError.invalidCallback
+        }
+        let params = Dictionary(uniqueKeysWithValues: (callback.queryItems ?? []).compactMap { item in
+            item.value.map { (item.name, $0) }
+        })
+        guard params["state"] == state else { throw AuthError.stateMismatch }
+        guard let code = params["code"] else {
+            throw AuthError.authorizationDenied(params["error_description"] ?? params["error"] ?? "Unknown error")
+        }
+
+        let newCredential = try await tokenRequest(fields: [
+            "grant_type": "authorization_code",
+            "client_id": Config.clientID,
+            "redirect_uri": Config.redirectURI,
+            "code": code,
+            "code_verifier": verifier
+        ], existingRefreshToken: nil)
+        try save(newCredential)
+        credential = newCredential
+    }
+
+    func presentationAnchor(for session: ASWebAuthenticationSession) -> ASPresentationAnchor {
+        let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
+        if let window = scenes.flatMap({ $0.windows }).first(where: { $0.isKeyWindow }) {
+            return window
+        }
+        return ASPresentationAnchor()
+    }
+
+    private func tokenRequest(fields: [String: String], existingRefreshToken: String?) async throws -> Credential {
+        guard let url = URL(string: Config.tokenURL) else { throw AuthError.invalidURL }
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        request.httpBody = Self.formEncode(fields).data(using: .utf8)
+
+        let (data, response) = try await URLSession.shared.data(for: request)
+        guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
+            throw AuthError.tokenExchangeFailed(String(data: data, encoding: .utf8) ?? "Unknown response")
+        }
+        guard let object = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let accessToken = object["access_token"] as? String else {
+            throw AuthError.invalidTokenResponse
+        }
+
+        let refreshToken = (object["refresh_token"] as? String) ?? existingRefreshToken ?? ""
+        let expiresIn: TimeInterval = (object["expires_in"] as? NSNumber)?.doubleValue ?? 3600
+        let claims = Self.decodeJWTPayload(accessToken)
+        let authClaims = claims?["https://api.openai.com/auth"] as? [String: Any]
+        let profileClaims = claims?["https://api.openai.com/profile"] as? [String: Any]
+
+        return Credential(
+            accessToken: accessToken,
+            refreshToken: refreshToken,
+            expiresAt: Date().addingTimeInterval(expiresIn),
+            accountId: (claims?["chatgpt_account_id"] as? String) ?? (authClaims?["chatgpt_account_id"] as? String),
+            email: (claims?["email"] as? String) ?? (profileClaims?["email"] as? String)
+        )
+    }
+
+    private func save(_ credential: Credential) throws {
+        try ChatGPTKeychainStore.save(try JSONEncoder().encode(credential), account: Config.keychainAccount)
+    }
+
+    private static func decodeJWTPayload(_ jwt: String) -> [String: Any]? {
+        let parts = jwt.split(separator: ".")
+        guard parts.count >= 2 else { return nil }
+        var base64 = String(parts[1]).replacingOccurrences(of: "-", with: "+").replacingOccurrences(of: "_", with: "/")
+        base64 += String(repeating: "=", count: (4 - base64.count % 4) % 4)
+        guard let data = Data(base64Encoded: base64),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
+        return json
+    }
+
+    private static func randomURLSafeString(byteCount: Int) -> String {
+        var bytes = [UInt8](repeating: 0, count: byteCount)
+        _ = SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes)
+        return base64URL(Data(bytes))
+    }
+
+    private static func base64URL(_ data: Data) -> String {
+        data.base64EncodedString()
+            .replacingOccurrences(of: "+", with: "-")
+            .replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: "=", with: "")
+    }
+
+    private static func formEncode(_ values: [String: String]) -> String {
+        var allowed = CharacterSet.alphanumerics
+        allowed.insert(charactersIn: "-._~")
+        return values.map { key, value in
+            let k = key.addingPercentEncoding(withAllowedCharacters: allowed) ?? key
+            let v = value.addingPercentEncoding(withAllowedCharacters: allowed) ?? value
+            return "\(k)=\(v)"
+        }.joined(separator: "&")
+    }
+
+    enum AuthError: LocalizedError {
+        case invalidURL, missingCallback, invalidCallback, stateMismatch, invalidTokenResponse, notSignedIn, refreshUnavailable
+        case authorizationDenied(String), tokenExchangeFailed(String)
+
+        var errorDescription: String? {
+            switch self {
+            case .invalidURL: "ChatGPT 登录地址无效。"
+            case .missingCallback: "没有收到 ChatGPT 登录回调。"
+            case .invalidCallback: "ChatGPT 登录回调无效。"
+            case .stateMismatch: "ChatGPT 登录状态校验失败。"
+            case .authorizationDenied(let message): "ChatGPT 登录失败：\(message)"
+            case .tokenExchangeFailed(let message): "ChatGPT 登录令牌交换失败：\(message)"
+            case .invalidTokenResponse: "ChatGPT 返回了无效的登录令牌。"
+            case .notSignedIn: "请先打开 Open Voice Typer GPT，在设置中登录 ChatGPT。"
+            case .refreshUnavailable: "ChatGPT 登录已失效，请重新登录。"
+            }
+        }
+    }
+}

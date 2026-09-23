@@ -1,0 +1,116 @@
+name: Build
+
+concurrency:
+  group: voice2028-build-${{ github.ref }}
+  cancel-in-progress: true
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+      - "codex/**"
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  ios:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Select Xcode 26
+        run: sudo xcode-select -s /Applications/Xcode_26.3.app/Contents/Developer
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Validate current voice-only source
+        run: |
+          if rg -n 'PictureInPicture|AVPictureInPicture|\bPiP\b' VoiceKey VoiceKeyKeyboard Shared README.md; then
+            echo "Obsolete floating-media code or documentation is still present."
+            exit 1
+          fi
+          test ! -e VoiceKeyKeyboard/PinyinEngine.swift
+          test ! -d VoiceKeyKeyboard/Resources
+          if rg -n 'setKeyboardLanguage|preferredKeyboardLanguage|name=\\"language\\"' VoiceKey VoiceKeyKeyboard Shared; then
+            echo "Manual recognition-language controls are still present."
+            exit 1
+          fi
+          if rg -n 'AVAudioPlayer|keepAlivePlayer|silentWAVData|isKeepingAlive' VoiceKey VoiceKeyKeyboard Shared; then
+            echo "Silent background-audio playback must remain removed."
+            exit 1
+          fi
+
+      - name: Generate Xcode project
+        run: xcodegen generate
+
+      - name: Show Xcode version
+        run: xcodebuild -version
+
+      - name: Build for iOS Simulator
+        run: |
+          xcodebuild \
+            -project Voice2028.xcodeproj \
+            -scheme Voice2028 \
+            -sdk iphonesimulator \
+            -configuration Debug \
+            CODE_SIGNING_ALLOWED=NO \
+            build
+
+      - name: Archive unsigned iPhone app
+        run: |
+          xcodebuild \
+            -project Voice2028.xcodeproj \
+            -scheme Voice2028 \
+            -configuration Release \
+            -destination 'generic/platform=iOS' \
+            -archivePath "$RUNNER_TEMP/Voice2028.xcarchive" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            archive
+
+      - name: Validate packaged app metadata
+        run: |
+          APP_PATH="$RUNNER_TEMP/Voice2028.xcarchive/Products/Applications/Voice2028.app"
+          APP_PLIST="$APP_PATH/Info.plist"
+          KEYBOARD_PLIST="$APP_PATH/PlugIns/Voice2028Keyboard.appex/Info.plist"
+
+          test "$(/usr/libexec/PlistBuddy -c 'Print :NSMicrophoneUsageDescription' "$APP_PLIST")" != ""
+          test "$(/usr/libexec/PlistBuddy -c 'Print :NSExtension:NSExtensionPointIdentifier' "$KEYBOARD_PLIST")" = "com.apple.keyboard-service"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :NSExtension:NSExtensionAttributes:RequestsOpenAccess' "$KEYBOARD_PLIST")" = "true"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP_PLIST")" = "0.5.2"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP_PLIST")" = "20"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP_PLIST")" = "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$KEYBOARD_PLIST")"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP_PLIST")" = "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$KEYBOARD_PLIST")"
+
+      - name: Add ad-hoc signature skeleton
+        run: |
+          APP_PATH="$RUNNER_TEMP/Voice2028.xcarchive/Products/Applications/Voice2028.app"
+          KEYBOARD_PATH="$APP_PATH/PlugIns/Voice2028Keyboard.appex"
+
+          codesign --force --sign - --timestamp=none "$KEYBOARD_PATH"
+          codesign --force --sign - --timestamp=none "$APP_PATH"
+          codesign --verify --strict "$KEYBOARD_PATH"
+          codesign --verify --strict "$APP_PATH"
+
+      - name: Package Voice2028 IPA
+        run: |
+          APP_PATH="$RUNNER_TEMP/Voice2028.xcarchive/Products/Applications/Voice2028.app"
+          test -d "$APP_PATH"
+          mkdir -p "$RUNNER_TEMP/voice2028-ipa/Payload"
+          ditto "$APP_PATH" "$RUNNER_TEMP/voice2028-ipa/Payload/Voice2028.app"
+          cd "$RUNNER_TEMP/voice2028-ipa"
+          ditto -c -k --sequesterRsrc --keepParent Payload Voice2028-unsigned.ipa
+          mkdir -p "$GITHUB_WORKSPACE/artifacts"
+          mv Voice2028-unsigned.ipa "$GITHUB_WORKSPACE/artifacts/Voice2028-unsigned.ipa"
+
+      - name: Upload Voice2028 IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: Voice2028-unsigned
+          path: artifacts/Voice2028-unsigned.ipa
+          retention-days: 7
+          if-no-files-found: error

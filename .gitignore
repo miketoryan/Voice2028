@@ -1,0 +1,18 @@
+# Xcode
+DerivedData/
+*.xcuserstate
+xcuserdata/
+*.xccheckout
+*.moved-aside
+*.xcuserdatad/
+build/
+*.ipa
+*.dSYM.zip
+*.dSYM
+.DS_Store
+
+# Generated project
+VoiceKey.xcodeproj/
+
+# Secrets
+*.env

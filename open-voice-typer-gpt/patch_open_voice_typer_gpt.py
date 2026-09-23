@@ -185,6 +185,13 @@ struct DictationPipeline: Sendable {
         )
     }
 }
+
+extension Duration {
+    var milliseconds: Int {
+        Int(components.seconds) * 1_000
+            + Int(components.attoseconds / 1_000_000_000_000_000)
+    }
+}
 ''')
 
 # Keyboard state machine: no App Group or Darwin notifications. It talks directly
@@ -736,7 +743,7 @@ struct ConfigurationView: View {
     var body: some View {
         NavigationStack {
             Form {
-                Section("ChatGPT account") {
+                Section {
                     HStack {
                         Label("ChatGPT", systemImage: "person.crop.circle")
                         Spacer()
@@ -764,16 +771,20 @@ struct ConfigurationView: View {
                         }
                         .buttonStyle(.borderedProminent)
                     }
+                } header: {
+                    Text("ChatGPT account")
                 } footer: {
                     Text("直接登录你的 ChatGPT 账号进行语音识别和文本整理，不需要 API Key。")
                 }
 
-                Section("Microphone") {
+                Section {
                     Picker("Turn off after", selection: $settings.sessionAutoEndMinutes) {
                         ForEach(ProviderSettings.autoEndChoices, id: \.minutes) { choice in
                             Text(choice.label).tag(choice.minutes)
                         }
                     }
+                } header: {
+                    Text("Microphone")
                 } footer: {
                     Text("主程序保持后台音频会话，键盘通过本机 localhost 发送录音命令。")
                 }

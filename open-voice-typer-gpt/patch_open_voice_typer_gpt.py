@@ -33,11 +33,11 @@ for src in (builder / "open-voice-typer-gpt" / "app").glob("*.swift"):
 # is localhost, and each process keeps only its own harmless UI preferences.
 project = root / "project.yml"
 text = project.read_text()
-text = text.replace("bundleIdPrefix: com.shuaiwang", "bundleIdPrefix: com.miketoryan.openvoicetypergpt")
+text = text.replace("bundleIdPrefix: com.shuaiwang", "bundleIdPrefix: com.vocahq")
 text = text.replace("PRODUCT_BUNDLE_IDENTIFIER: com.shuaiwang.openvoicetyper.keyboard",
-                    "PRODUCT_BUNDLE_IDENTIFIER: com.miketoryan.openvoicetypergpt.keyboard")
+                    "PRODUCT_BUNDLE_IDENTIFIER: com.vocahq.vocaphone.keyboard")
 text = text.replace("PRODUCT_BUNDLE_IDENTIFIER: com.shuaiwang.openvoicetyper",
-                    "PRODUCT_BUNDLE_IDENTIFIER: com.miketoryan.openvoicetypergpt")
+                    "PRODUCT_BUNDLE_IDENTIFIER: com.vocahq.vocaphone")
 text = text.replace("CFBundleDisplayName: Open Voice Typer", "CFBundleDisplayName: Open Voice Typer GPT")
 text = text.replace("CFBundleDisplayName: Voice Typer", "CFBundleDisplayName: Voice Typer GPT")
 text = text.replace(

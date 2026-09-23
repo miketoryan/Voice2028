@@ -194,7 +194,6 @@ replace_once(
         // with the signed-in ChatGPT account.
         await streamingBridge.cancel()
         await finalizeWithChatGPT(&record, audioURL: output)
-        return
 
         // Local inference deliberately happens before the gateway guard. A
 '''
@@ -205,7 +204,7 @@ p = ios / rc
 text = p.read_text()
 old_start = text.index("        // Local inference deliberately happens before the gateway guard. A")
 next_method = text.index("    private func finalizeLocally(_ record: inout SessionRecord, audioURL: URL) async {")
-text = text[:old_start] + "    }\\n\\n" + text[next_method:]
+text = text[:old_start] + "    }\n\n" + text[next_method:]
 p.write_text(text)
 
 method_marker = '    private func finalizeLocally(_ record: inout SessionRecord, audioURL: URL) async {\n'

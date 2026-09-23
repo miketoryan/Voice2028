@@ -95,8 +95,13 @@ final class VocaPhoneAltBridgeServer: @unchecked Sendable {
         let header = "HTTP/1.1 \(status) \(reason)\r\nContent-Type: application/json\r\nContent-Length: \(data.count)\r\nConnection: close\r\n\r\n"
         var response = Data(header.utf8)
         response.append(data)
-        connection.send(content: response, contentContext: .finalMessage, isComplete: true) { _ in
-            connection.cancel()
-        }
+        connection.send(
+            content: response,
+            contentContext: .finalMessage,
+            isComplete: true,
+            completion: .contentProcessed { _ in
+                connection.cancel()
+            }
+        )
     }
 }

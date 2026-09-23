@@ -1,0 +1,145 @@
+name: Build VocaPhone GPT for AltServer
+
+on:
+  push:
+    branches:
+      - vocaphone-altserver-build
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  HOMEBREW_NO_AUTO_UPDATE: '1'
+  HOMEBREW_NO_INSTALL_CLEANUP: '1'
+  HOMEBREW_NO_ENV_HINTS: '1'
+  VOCAPHONE_REF: 06f6374ec8f3169c294d7a51c1544c28dbe0418b
+
+jobs:
+  ios:
+    runs-on: macos-15
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout build customizations
+        uses: actions/checkout@v4
+        with:
+          path: builder
+          persist-credentials: false
+
+      - name: Checkout VocaPhone
+        uses: actions/checkout@v4
+        with:
+          repository: VocaHQ/vocaphone
+          ref: ${{ env.VOCAPHONE_REF }}
+          path: src
+          fetch-depth: 1
+          submodules: false
+          persist-credentials: false
+
+      - name: Patch VocaPhone with ChatGPT transcription
+        run: |
+          set -euo pipefail
+          python3 builder/vocaphone-gpt/patch_vocaphone_gpt.py "$GITHUB_WORKSPACE/builder" "$GITHUB_WORKSPACE/src"
+          grep -R "ChatGPT 模式" -n src/ios/VocaPhoneKeyboard
+          grep -R "finalizeWithChatGPT" -n src/ios/VocaPhoneApp/Sessions/RecordingCoordinator.swift
+
+      - name: Select Xcode 26
+        run: |
+          set -euo pipefail
+          app="$(printf '%s\n' /Applications/Xcode_26*.app | sort -V | tail -1)"
+          sudo xcode-select -s "$app"
+          xcodebuild -version
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate Xcode project
+        working-directory: src/ios
+        run: |
+          set -euo pipefail
+          xcodegen generate --spec project.yml
+
+      - name: Ensure iOS device platform
+        working-directory: src/ios
+        run: |
+          set -euo pipefail
+          if xcodebuild -project VocaPhone.xcodeproj -scheme VocaPhone -showdestinations 2>/dev/null | grep -q 'name:Any iOS Device'; then
+            echo "Any iOS Device destination is available"
+          else
+            xcodebuild -downloadPlatform iOS
+          fi
+
+      - name: Resolve Swift packages
+        working-directory: src/ios
+        run: |
+          set -euo pipefail
+          xcodebuild -resolvePackageDependencies             -project VocaPhone.xcodeproj             -scheme VocaPhone
+
+      - name: Archive unsigned iPhone app
+        env:
+          DERIVED_DATA: ${{ runner.temp }}/DerivedData
+          ARCHIVE_PATH: ${{ runner.temp }}/VocaPhone.xcarchive
+        working-directory: src/ios
+        run: |
+          set -euo pipefail
+          xcodebuild             -project VocaPhone.xcodeproj             -scheme VocaPhone             -configuration Release             -destination 'generic/platform=iOS'             -derivedDataPath "$DERIVED_DATA"             -archivePath "$ARCHIVE_PATH"             COMPILER_INDEX_STORE_ENABLE=NO             CODE_SIGNING_ALLOWED=NO             CODE_SIGNING_REQUIRED=NO             archive
+
+      - name: Prepare app bundle
+        env:
+          ARCHIVE_PATH: ${{ runner.temp }}/VocaPhone.xcarchive
+        working-directory: src/ios
+        run: |
+          set -euo pipefail
+          APP="$ARCHIVE_PATH/Products/Applications/VocaPhoneApp.app"
+          test -d "$APP"
+
+          # Remove static SwiftPM framework stubs that the executable does not
+          # load. VocaPhone's own TestFlight workflow performs the same cleanup.
+          load_names=""
+          for bundle in "$APP" "$APP"/PlugIns/*.appex "$APP"/Frameworks/*.framework "$APP"/PlugIns/*.appex/Frameworks/*.framework; do
+            [ -d "$bundle" ] || continue
+            executable="$bundle/$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$bundle/Info.plist")"
+            load_names+="$(otool -l "$executable" | awk '/cmd LC_(LOAD|LOAD_WEAK|REEXPORT|LAZY_LOAD|LOAD_UPWARD)_DYLIB$/{f=1} f && $1=="name"{print $2; f=0}')"$'\n'
+          done
+          for framework in "$APP"/Frameworks/*.framework "$APP"/PlugIns/*.appex/Frameworks/*.framework; do
+            [ -d "$framework" ] || continue
+            if [[ "$load_names" == *"/$(basename "$framework")/"* ]]; then
+              continue
+            fi
+            echo "Removing unlinked embedded framework ${framework#"$APP"/}"
+            rm -rf "$framework"
+          done
+
+          rm -rf "$APP/_CodeSignature"
+          rm -f "$APP/embedded.mobileprovision"
+          find "$APP/PlugIns" -name _CodeSignature -type d -prune -exec rm -rf {} + 2>/dev/null || true
+          find "$APP/PlugIns" -name embedded.mobileprovision -type f -delete 2>/dev/null || true
+
+          echo "Main bundle: $(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$APP/Info.plist")"
+          echo "Version: $(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP/Info.plist")"
+          echo "Build: $(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP/Info.plist")"
+          find "$APP/PlugIns" -maxdepth 2 -name Info.plist -print
+
+      - name: Package unsigned IPA
+        env:
+          ARCHIVE_PATH: ${{ runner.temp }}/VocaPhone.xcarchive
+        run: |
+          set -euo pipefail
+          APP="$ARCHIVE_PATH/Products/Applications/VocaPhoneApp.app"
+          STAGE="$RUNNER_TEMP/vocaphone-gpt-ipa"
+          rm -rf "$STAGE"
+          mkdir -p "$STAGE/Payload"
+          ditto "$APP" "$STAGE/Payload/VocaPhoneApp.app"
+          cd "$STAGE"
+          ditto -c -k --sequesterRsrc --keepParent Payload VocaPhone-GPT-unsigned.ipa
+          mkdir -p "$GITHUB_WORKSPACE/out"
+          mv VocaPhone-GPT-unsigned.ipa "$GITHUB_WORKSPACE/out/VocaPhone-GPT-unsigned.ipa"
+          ls -lh "$GITHUB_WORKSPACE/out/VocaPhone-GPT-unsigned.ipa"
+
+      - name: Upload AltServer IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: VocaPhone-GPT-AltServer
+          path: out/VocaPhone-GPT-unsigned.ipa
+          if-no-files-found: error

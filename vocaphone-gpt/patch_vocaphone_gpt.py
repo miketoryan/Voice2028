@@ -131,7 +131,7 @@ card = '''    private var chatGPTCard: some View {
                 Spacer()
                 Text(chatGPTAuth.isSignedIn ? "已登录" : "未登录")
                     .font(.subheadline)
-                    .foregroundStyle(chatGPTAuth.isSignedIn ? .secondary : .orange)
+                    .foregroundStyle(chatGPTAuth.isSignedIn ? Color.secondary : Color.orange)
             }
 
             if let email = chatGPTAuth.accountEmail, chatGPTAuth.isSignedIn {
@@ -199,6 +199,14 @@ replace_once(
         // Local inference deliberately happens before the gateway guard. A
 '''
 )
+
+# Remove the original local-model/gateway body from finalizeAndTranscribe.
+p = ios / rc
+text = p.read_text()
+old_start = text.index("        // Local inference deliberately happens before the gateway guard. A")
+next_method = text.index("    private func finalizeLocally(_ record: inout SessionRecord, audioURL: URL) async {")
+text = text[:old_start] + "    }\\n\\n" + text[next_method:]
+p.write_text(text)
 
 method_marker = '    private func finalizeLocally(_ record: inout SessionRecord, audioURL: URL) async {\n'
 method = '''    private func finalizeWithChatGPT(_ record: inout SessionRecord, audioURL: URL) async {

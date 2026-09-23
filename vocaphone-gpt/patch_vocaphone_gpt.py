@@ -308,6 +308,8 @@ alt_arm = '''    private func armQuickDictation() {
         }
     }
 
+    private static let standbyDeadlinePublishInterval: TimeInterval = 60
+
 '''
 text = text[:arm_start] + alt_arm + text[watcher_start:]
 p.write_text(text)

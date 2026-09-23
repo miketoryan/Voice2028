@@ -11,6 +11,7 @@ enum VocaPhoneAltBridgeAction: String, Codable, Sendable {
     case state
     case start
     case stop
+    case cancel
     case acknowledge
 }
 

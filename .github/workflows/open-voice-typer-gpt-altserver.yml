@@ -1,0 +1,74 @@
+name: Build Open Voice Typer GPT for AltServer
+
+on:
+  push:
+    branches:
+      - open-voice-typer-gpt-altserver
+    paths:
+      - "open-voice-typer-gpt/**"
+      - ".github/workflows/open-voice-typer-gpt-altserver.yml"
+  workflow_dispatch:
+
+jobs:
+  ios:
+    runs-on: macos-26
+    steps:
+      - name: Checkout build customizations
+        uses: actions/checkout@v4
+        with:
+          path: builder
+
+      - name: Checkout Open Voice Typer
+        uses: actions/checkout@v4
+        with:
+          repository: cosmicshuai/open_voice_typer
+          ref: 734d300eb452c1b3fffcfd84605aa967daa9a1ee
+          path: src
+
+      - name: Patch Open Voice Typer
+        run: python3 builder/open-voice-typer-gpt/patch_open_voice_typer_gpt.py "$PWD/builder" "$PWD/src"
+
+      - name: Select Xcode 26
+        run: |
+          sudo xcode-select -s /Applications/Xcode_26.0.app/Contents/Developer 2>/dev/null || \
+          sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
+          xcodebuild -version
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate Xcode project
+        working-directory: src
+        run: xcodegen generate
+
+      - name: Archive unsigned iPhone app
+        working-directory: src
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -project OpenVoiceTyper.xcodeproj \
+            -scheme OpenVoiceTyper \
+            -configuration Release \
+            -destination 'generic/platform=iOS' \
+            -archivePath "$RUNNER_TEMP/OpenVoiceTyperGPT.xcarchive" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            archive
+
+      - name: Package unsigned IPA
+        run: |
+          APP="$RUNNER_TEMP/OpenVoiceTyperGPT.xcarchive/Products/Applications/OpenVoiceTyper.app"
+          test -d "$APP"
+          rm -rf "$RUNNER_TEMP/Payload"
+          mkdir -p "$RUNNER_TEMP/Payload"
+          cp -R "$APP" "$RUNNER_TEMP/Payload/"
+          /usr/bin/ditto -c -k --sequesterRsrc --keepParent "$RUNNER_TEMP/Payload" "$RUNNER_TEMP/OpenVoiceTyper-GPT-AltServer.ipa"
+          /usr/bin/unzip -l "$RUNNER_TEMP/OpenVoiceTyper-GPT-AltServer.ipa" | head -30
+
+      - name: Upload AltServer IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: OpenVoiceTyper-GPT-AltServer
+          path: ${{ runner.temp }}/OpenVoiceTyper-GPT-AltServer.ipa
+          if-no-files-found: error

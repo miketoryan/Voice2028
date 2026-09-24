@@ -26,6 +26,14 @@ enum RecognitionLanguage: String, CaseIterable, Identifiable {
     }
 }
 
+private final class AudioSessionObserverToken: @unchecked Sendable {
+    let value: NSObjectProtocol
+
+    init(_ value: NSObjectProtocol) {
+        self.value = value
+    }
+}
+
 @MainActor
 final class AppModel: ObservableObject {
     @Published private(set) var signedIn: Bool
@@ -74,7 +82,7 @@ final class AppModel: ObservableObject {
     private var keyboardMonitorTask: Task<Void, Never>?
     private var transcriptionTask: Task<Void, Never>?
     private var audioActivationTask: Task<Bool, Never>?
-    private var audioSessionObservers: [NSObjectProtocol] = []
+    private var audioSessionObservers: [AudioSessionObserverToken] = []
 
     private enum Defaults {
         static let interfaceLanguage = "voice2028.interface-language"
@@ -117,7 +125,7 @@ final class AppModel: ObservableObject {
         transcriptionTask?.cancel()
         audioActivationTask?.cancel()
         for observer in audioSessionObservers {
-            NotificationCenter.default.removeObserver(observer)
+            NotificationCenter.default.removeObserver(observer.value)
         }
         localBridge.stop()
     }
@@ -469,7 +477,7 @@ final class AppModel: ObservableObject {
         let center = NotificationCenter.default
 
         audioSessionObservers.append(
-            center.addObserver(
+            AudioSessionObserverToken(center.addObserver(
                 forName: AVAudioSession.interruptionNotification,
                 object: AVAudioSession.sharedInstance(),
                 queue: .main
@@ -485,11 +493,11 @@ final class AppModel: ObservableObject {
                         options: AVAudioSession.InterruptionOptions(rawValue: optionsValue ?? 0)
                     )
                 }
-            }
+            ))
         )
 
         audioSessionObservers.append(
-            center.addObserver(
+            AudioSessionObserverToken(center.addObserver(
                 forName: AVAudioSession.mediaServicesWereResetNotification,
                 object: AVAudioSession.sharedInstance(),
                 queue: .main
@@ -497,7 +505,7 @@ final class AppModel: ObservableObject {
                 Task { @MainActor [weak self] in
                     await self?.handleMediaServicesReset()
                 }
-            }
+            ))
         )
     }
 

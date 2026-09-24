@@ -230,14 +230,11 @@ final class KeyboardViewController: UIInputViewController {
         case .starting, .transcribing:
             break
         default:
-            // Reuse the warm microphone while it is still genuinely ready.
-            // Once the microphone has gone cold, skip the failing background
-            // AVAudioSession restart and immediately use foreground wake-and-return.
-            if latestState.microphoneReady {
-                startRecordingRequest()
-            } else {
-                launchVoice2028AndResumeRecording()
-            }
+            // Silent standby keeps the app process ready without holding the
+            // microphone open. Ask that live service to start capture first;
+            // the existing timeout/error path wakes Voice2028 only when iOS
+            // rejects the background audio transition.
+            startRecordingRequest(allowForegroundFallback: true)
         }
     }
 
@@ -803,3 +800,4 @@ final class KeyboardViewController: UIInputViewController {
         return false
     }
 }
+

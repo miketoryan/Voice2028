@@ -174,7 +174,7 @@ final class AudioService: @unchecked Sendable {
     }
 
     func suspendStandbyForInterruption() {
-        guard !captureIsActive else { return }
+        guard !hasActiveCapture() else { return }
         stopCaptureEngine()
         stopKeepAlive()
         try? AVAudioSession.sharedInstance().setActive(
@@ -190,6 +190,12 @@ final class AudioService: @unchecked Sendable {
         engine = AVAudioEngine()
         keepAlivePlayer = nil
         audioSessionIsActive = false
+    }
+
+    private func hasActiveCapture() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return captureIsActive
     }
 
     private func prepareCaptureSession(_ session: AVAudioSession) throws {

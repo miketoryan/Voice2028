@@ -1,3 +1,4 @@
+import AVFoundation
 import Combine
 import Foundation
 import UIKit
@@ -22,6 +23,14 @@ enum RecognitionLanguage: String, CaseIterable, Identifiable {
         case .english:
             "English"
         }
+    }
+}
+
+private final class AudioSessionObserverToken: @unchecked Sendable {
+    let value: NSObjectProtocol
+
+    init(_ value: NSObjectProtocol) {
+        self.value = value
     }
 }
 
@@ -73,6 +82,7 @@ final class AppModel: ObservableObject {
     private var keyboardMonitorTask: Task<Void, Never>?
     private var transcriptionTask: Task<Void, Never>?
     private var audioActivationTask: Task<Bool, Never>?
+    private var audioSessionObservers: [AudioSessionObserverToken] = []
 
     private enum Defaults {
         static let interfaceLanguage = "voice2028.interface-language"
@@ -106,12 +116,17 @@ final class AppModel: ObservableObject {
             lastError = error.localizedDescription
             statusText = ui("键盘本地连接失败", "Local keyboard connection failed")
         }
+
+        installAudioSessionObservers()
     }
 
     deinit {
         keyboardMonitorTask?.cancel()
         transcriptionTask?.cancel()
         audioActivationTask?.cancel()
+        for observer in audioSessionObservers {
+            NotificationCenter.default.removeObserver(observer.value)
+        }
         localBridge.stop()
     }
 
@@ -135,9 +150,10 @@ final class AppModel: ObservableObject {
     }
 
     func startService() async {
-        // Keep the local bridge available with the microphone off. When the
-        // keyboard needs audio, Voice2028 briefly wakes in the foreground,
-        // starts capture, and immediately returns to the previous app.
+        // Keep the local bridge and silent audio standby available while the
+        // input engine remains stopped. The keyboard first asks this live
+        // service to begin capture and only uses foreground recovery if iOS
+        // rejects that background transition.
         await startService(armingMicrophoneBeforeReturn: false)
     }
 
@@ -236,7 +252,7 @@ final class AppModel: ObservableObject {
         }
 
         guard let requestID, !requestID.isEmpty,
-              startRecordingFromKeyboard(
+              await startRecordingFromKeyboard(
                   requestID: requestID,
                   mode: mode
               ),
@@ -301,18 +317,16 @@ final class AppModel: ObservableObject {
 
         case .startRecording:
             noteKeyboardHeartbeat()
-            if await activateMicrophoneForRecording() {
-                startRecordingFromKeyboard(
-                    requestID: request.requestID,
-                    mode: request.mode ?? .smart
-                )
-            }
+            await startRecordingFromKeyboard(
+                requestID: request.requestID,
+                mode: request.mode ?? .smart
+            )
 
         case .stopRecording:
             noteKeyboardHeartbeat()
             beginFinishingRecording(
                 expectedRequestID: request.requestID,
-                deactivateMicrophoneAfterCapture: false
+                deactivateMicrophoneAfterCapture: true
             )
 
         case .acknowledgeResult:
@@ -459,6 +473,126 @@ final class AppModel: ObservableObject {
         }
     }
 
+    private func installAudioSessionObservers() {
+        let center = NotificationCenter.default
+
+        let interruptionObserver = center.addObserver(
+            forName: AVAudioSession.interruptionNotification,
+            object: AVAudioSession.sharedInstance(),
+            queue: .main
+        ) { [weak self] notification in
+            let typeValue = notification.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt
+            let optionsValue = notification.userInfo?[AVAudioSessionInterruptionOptionKey] as? UInt
+            guard let typeValue,
+                  let type = AVAudioSession.InterruptionType(rawValue: typeValue) else { return }
+
+            Task { @MainActor [weak self] in
+                await self?.handleAudioSessionInterruption(
+                    type,
+                    options: AVAudioSession.InterruptionOptions(rawValue: optionsValue ?? 0)
+                )
+            }
+        }
+        audioSessionObservers.append(
+            AudioSessionObserverToken(interruptionObserver)
+        )
+
+        let mediaResetObserver = center.addObserver(
+            forName: AVAudioSession.mediaServicesWereResetNotification,
+            object: AVAudioSession.sharedInstance(),
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                await self?.handleMediaServicesReset()
+            }
+        }
+        audioSessionObservers.append(
+            AudioSessionObserverToken(mediaResetObserver)
+        )
+    }
+
+    private func handleAudioSessionInterruption(
+        _ type: AVAudioSession.InterruptionType,
+        options: AVAudioSession.InterruptionOptions
+    ) async {
+        switch type {
+        case .began:
+            if bridgeStatus == .recording {
+                keyboardMonitorTask?.cancel()
+                keyboardMonitorTask = nil
+                if let url = audio.endCapture() ?? activeRecordingURL {
+                    try? FileManager.default.removeItem(at: url)
+                }
+                activeRecordingURL = nil
+                publishError(
+                    ui(
+                        "录音被系统中断，请重新录音",
+                        "Recording was interrupted. Please try again."
+                    ),
+                    requestID: activeRequestID
+                )
+            }
+            audio.suspendStandbyForInterruption()
+            serviceReady = false
+            if bridgeStatus != .error {
+                statusText = ui("音频被系统暂停", "Audio was interrupted")
+            }
+            markStateChanged()
+
+        case .ended:
+            guard options.contains(.shouldResume), signedIn,
+                  bridgeStatus != .recording else { return }
+            await restoreStandbyAfterSystemAudioChange()
+
+        @unknown default:
+            break
+        }
+    }
+
+    private func handleMediaServicesReset() async {
+        if bridgeStatus == .recording {
+            if let url = audio.endCapture() ?? activeRecordingURL {
+                try? FileManager.default.removeItem(at: url)
+            }
+            activeRecordingURL = nil
+            publishError(
+                ui(
+                    "系统音频服务已重启，请重新录音",
+                    "System audio restarted. Please record again."
+                ),
+                requestID: activeRequestID
+            )
+        }
+
+        audio.resetAfterMediaServicesReset()
+        serviceReady = false
+        markStateChanged()
+
+        guard signedIn else { return }
+        await restoreStandbyAfterSystemAudioChange()
+    }
+
+    private func restoreStandbyAfterSystemAudioChange() async {
+        do {
+            try await performAudioOperationWithRetry {
+                try audio.enterStandby()
+            }
+            serviceReady = true
+            if bridgeStatus == .idle
+                || (bridgeStatus == .error && activeRequestID == nil) {
+                bridgeStatus = .idle
+                bridgeError = nil
+                lastError = nil
+            }
+            refreshStatusText()
+            markStateChanged()
+        } catch {
+            audio.disarm()
+            serviceReady = false
+            publishError(error.localizedDescription, requestID: activeRequestID)
+        }
+    }
+
     private static func isTransientAudioSessionError(_ error: Error) -> Bool {
         // iOS can briefly reject an audio transition while moving between the
         // host app and keyboard extension. Retry the known transient
@@ -472,8 +606,8 @@ final class AppModel: ObservableObject {
     private func startRecordingFromKeyboard(
         requestID: String?,
         mode: TranscriptionMode
-    ) -> Bool {
-        guard serviceReady, audio.isRunning else {
+    ) async -> Bool {
+        guard serviceReady else {
             publishError(
                 "Open Voice2028 and start Keyboard Service first.",
                 requestID: requestID
@@ -490,6 +624,26 @@ final class AppModel: ObservableObject {
               bridgeStatus != .starting,
               bridgeStatus != .transcribing else {
             return bridgeStatus == .recording
+        }
+
+        guard await activateMicrophoneForRecording() else {
+            publishError(
+                bridgeError ?? ui(
+                    "无法在后台启动麦克风",
+                    "Could not start the microphone in the background."
+                ),
+                requestID: requestID
+            )
+            recoverAudioAfterFailedRecordingStart()
+            return false
+        }
+        guard serviceReady, audio.isRunning else {
+            publishError(
+                "Open Voice2028 and start Keyboard Service first.",
+                requestID: requestID
+            )
+            recoverAudioAfterFailedRecordingStart()
+            return false
         }
 
         bridgeStatus = .starting
@@ -839,3 +993,4 @@ final class AppModel: ObservableObject {
         return true
     }
 }
+

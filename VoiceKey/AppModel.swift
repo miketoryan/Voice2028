@@ -476,36 +476,38 @@ final class AppModel: ObservableObject {
     private func installAudioSessionObservers() {
         let center = NotificationCenter.default
 
-        audioSessionObservers.append(
-            AudioSessionObserverToken(center.addObserver(
-                forName: AVAudioSession.interruptionNotification,
-                object: AVAudioSession.sharedInstance(),
-                queue: .main
-            ) { [weak self] notification in
-                let typeValue = notification.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt
-                let optionsValue = notification.userInfo?[AVAudioSessionInterruptionOptionKey] as? UInt
-                guard let typeValue,
-                      let type = AVAudioSession.InterruptionType(rawValue: typeValue) else { return }
+        let interruptionObserver = center.addObserver(
+            forName: AVAudioSession.interruptionNotification,
+            object: AVAudioSession.sharedInstance(),
+            queue: .main
+        ) { [weak self] notification in
+            let typeValue = notification.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt
+            let optionsValue = notification.userInfo?[AVAudioSessionInterruptionOptionKey] as? UInt
+            guard let typeValue,
+                  let type = AVAudioSession.InterruptionType(rawValue: typeValue) else { return }
 
-                Task { @MainActor [weak self] in
-                    await self?.handleAudioSessionInterruption(
-                        type,
-                        options: AVAudioSession.InterruptionOptions(rawValue: optionsValue ?? 0)
-                    )
-                }
-            ))
+            Task { @MainActor [weak self] in
+                await self?.handleAudioSessionInterruption(
+                    type,
+                    options: AVAudioSession.InterruptionOptions(rawValue: optionsValue ?? 0)
+                )
+            }
+        }
+        audioSessionObservers.append(
+            AudioSessionObserverToken(interruptionObserver)
         )
 
+        let mediaResetObserver = center.addObserver(
+            forName: AVAudioSession.mediaServicesWereResetNotification,
+            object: AVAudioSession.sharedInstance(),
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                await self?.handleMediaServicesReset()
+            }
+        }
         audioSessionObservers.append(
-            AudioSessionObserverToken(center.addObserver(
-                forName: AVAudioSession.mediaServicesWereResetNotification,
-                object: AVAudioSession.sharedInstance(),
-                queue: .main
-            ) { [weak self] _ in
-                Task { @MainActor [weak self] in
-                    await self?.handleMediaServicesReset()
-                }
-            ))
+            AudioSessionObserverToken(mediaResetObserver)
         )
     }
 

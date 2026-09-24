@@ -2,7 +2,7 @@ import AVFoundation
 import Foundation
 
 final class AudioService: @unchecked Sendable {
-    private let engine = AVAudioEngine()
+    private var engine = AVAudioEngine()
     private let lock = NSLock()
     private var keepAlivePlayer: AVAudioPlayer?
     private var outputFile: AVAudioFile?
@@ -11,6 +11,7 @@ final class AudioService: @unchecked Sendable {
     private var currentURL: URL?
     private var tapInstalled = false
     private var audioSessionIsActive = false
+    private var captureIsActive = false
 
     private(set) var isArmed = false
 
@@ -36,9 +37,9 @@ final class AudioService: @unchecked Sendable {
         stopKeepAlive()
 
         let session = AVAudioSession.sharedInstance()
-        // Match the proven v0.4.2 lifecycle: configure one stable, mixable
-        // play-and-record session before starting AVAudioEngine and keep that
-        // category unchanged while the engine remains warm.
+        // Keep one stable, mixable play-and-record category across standby and
+        // capture. Only the input engine changes state, which keeps the privacy
+        // indicator tied to an actual recording attempt.
         try prepareCaptureSession(session)
 
         let input = engine.inputNode
@@ -142,6 +143,7 @@ final class AudioService: @unchecked Sendable {
         captureConverter = converter
         captureOutputFormat = outputFormat
         currentURL = url
+        captureIsActive = true
         lock.unlock()
 
         return url
@@ -154,11 +156,13 @@ final class AudioService: @unchecked Sendable {
         captureOutputFormat = nil
         let url = currentURL
         currentURL = nil
+        captureIsActive = false
         lock.unlock()
 
-        // Keep the v0.4.2-style warm microphone running between dictations.
-        // The AudioSession stays in the same mixable play-and-record category,
-        // so the next recording does not need another category transition.
+        // The input engine belongs to one capture only. Keeping the audio
+        // session ready is handled by enterStandby(), which uses output-only
+        // silent playback and does not hold the microphone open.
+        stopCaptureEngine()
         return url
     }
 
@@ -166,6 +170,25 @@ final class AudioService: @unchecked Sendable {
         stopCaptureEngine()
         stopKeepAlive()
         try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+        audioSessionIsActive = false
+    }
+
+    func suspendStandbyForInterruption() {
+        guard !captureIsActive else { return }
+        stopCaptureEngine()
+        stopKeepAlive()
+        try? AVAudioSession.sharedInstance().setActive(
+            false,
+            options: .notifyOthersOnDeactivation
+        )
+        audioSessionIsActive = false
+    }
+
+    func resetAfterMediaServicesReset() {
+        stopCaptureEngine()
+        stopKeepAlive()
+        engine = AVAudioEngine()
+        keepAlivePlayer = nil
         audioSessionIsActive = false
     }
 
@@ -198,6 +221,7 @@ final class AudioService: @unchecked Sendable {
         captureConverter = nil
         captureOutputFormat = nil
         currentURL = nil
+        captureIsActive = false
         lock.unlock()
 
         if engine.isRunning {
@@ -308,3 +332,4 @@ private extension Data {
         }
     }
 }
+

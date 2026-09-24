@@ -2,6 +2,29 @@ import Combine
 import Foundation
 import UIKit
 
+enum RecognitionLanguage: String, CaseIterable, Identifiable {
+    case chinese = "zh"
+    case automatic = "auto"
+    case english = "en"
+
+    var id: String { rawValue }
+
+    var apiValue: String? {
+        self == .automatic ? nil : rawValue
+    }
+
+    func displayName(interfaceLanguage: InterfaceLanguage) -> String {
+        switch self {
+        case .chinese:
+            interfaceLanguage.text(chinese: "中文", english: "Chinese")
+        case .automatic:
+            interfaceLanguage.text(chinese: "自动", english: "Auto")
+        case .english:
+            "English"
+        }
+    }
+}
+
 @MainActor
 final class AppModel: ObservableObject {
     @Published private(set) var signedIn: Bool
@@ -21,12 +44,21 @@ final class AppModel: ObservableObject {
         }
     }
 
+    @Published var recognitionLanguage: RecognitionLanguage {
+        didSet {
+            UserDefaults.standard.set(
+                recognitionLanguage.rawValue,
+                forKey: Defaults.recognitionLanguage
+            )
+        }
+    }
+
     private let auth: ChatGPTAuthManager
     private let audio = AudioService()
     private let transcriber = ChatGPTTranscriptionService()
     private let cleanupService = ChatGPTCleanupService()
     private let localBridge = LocalBridgeServer()
-    private let serverID = UUID().uuidString
+    private var serverID = UUID().uuidString
 
     private var stateRevision: UInt64 = 0
     private var activeRecordingURL: URL?
@@ -44,6 +76,7 @@ final class AppModel: ObservableObject {
 
     private enum Defaults {
         static let interfaceLanguage = "voice2028.interface-language"
+        static let recognitionLanguage = "voice2028.recognition-language"
     }
 
     init() {
@@ -51,6 +84,9 @@ final class AppModel: ObservableObject {
             rawValue: UserDefaults.standard.string(forKey: Defaults.interfaceLanguage) ?? ""
         ) ?? .chinese
 
+        recognitionLanguage = RecognitionLanguage(
+            rawValue: UserDefaults.standard.string(forKey: Defaults.recognitionLanguage) ?? ""
+        ) ?? .chinese
 
         let auth = ChatGPTAuthManager()
         self.auth = auth
@@ -177,6 +213,17 @@ final class AppModel: ObservableObject {
         let mode = queryItems.first(where: {
             $0.name == "mode"
         })?.value.flatMap(TranscriptionMode.init(rawValue:)) ?? .smart
+
+        // A long-lived background instance can keep its audio process alive
+        // while the localhost listener has become unreachable to the keyboard.
+        // Rebuild the listener during the foreground handoff and publish a new
+        // server ID so the returned keyboard adopts the fresh bridge exactly
+        // as it would after a clean app launch.
+        guard await restartLocalBridgeForForegroundHandoff() else {
+            handoffActive = false
+            return
+        }
+
         // Fallback path: start the *actual recording file* while Voice2028 is
         // in the foreground, then return to the host app. This avoids the real-
         // device failure where AVAudioEngine reported "recording" after the
@@ -188,17 +235,17 @@ final class AppModel: ObservableObject {
             return
         }
 
-        // Establish a ten-second lease before returning to the host. An older
-        // keyboard extension may still be resident after a sideload update. If
-        // it never reconnects, the microphone monitor must still shut down the
-        // real input engine instead of waiting forever for its first heartbeat.
-        noteKeyboardHeartbeat()
-
-        if let requestID, !requestID.isEmpty {
-            startRecordingFromKeyboard(
-                requestID: requestID,
-                mode: mode
-            )
+        guard let requestID, !requestID.isEmpty,
+              startRecordingFromKeyboard(
+                  requestID: requestID,
+                  mode: mode
+              ),
+              bridgeStatus == .recording else {
+            // Never jump back with a half-activated microphone. If capture did
+            // not really start, the failure path has already returned audio to
+            // safe standby and the user remains in Voice2028 instead.
+            handoffActive = false
+            return
         }
 
         // Return as soon as capture is confirmed. A long artificial delay makes
@@ -252,9 +299,6 @@ final class AppModel: ObservableObject {
         case .heartbeat:
             noteKeyboardHeartbeat()
 
-        case .keyboardHidden:
-            noteKeyboardExit()
-
         case .startRecording:
             noteKeyboardHeartbeat()
             if await activateMicrophoneForRecording() {
@@ -283,17 +327,6 @@ final class AppModel: ObservableObject {
         guard serviceReady else { return }
         lastKeyboardHeartbeat = Date()
         keyboardHasConnected = true
-    }
-
-    private func noteKeyboardExit() {
-        guard serviceReady else { return }
-        // Use the exit time as the final lease timestamp. The existing monitor
-        // then performs the same delayed shutdown used for a missed heartbeat.
-        lastKeyboardHeartbeat = Date()
-        keyboardHasConnected = true
-        if audio.isRunning {
-            startKeyboardMonitor()
-        }
     }
 
     private func activateMicrophoneForRecording() async -> Bool {
@@ -336,6 +369,77 @@ final class AppModel: ObservableObject {
         return activated
     }
 
+    private func restartLocalBridgeForForegroundHandoff() async -> Bool {
+        localBridge.stop()
+        try? await Task.sleep(for: .milliseconds(80))
+
+        serverID = UUID().uuidString
+        do {
+            try localBridge.start { [weak self] request in
+                guard let self else {
+                    return BridgeState.unavailable("Voice2028 is not running.")
+                }
+                return await self.handleBridgeRequest(request)
+            }
+            markStateChanged()
+            return true
+        } catch {
+            serviceReady = false
+            lastError = error.localizedDescription
+            bridgeError = error.localizedDescription
+            statusText = ui("键盘本地连接重启失败", "Local keyboard connection restart failed")
+            markStateChanged()
+            return false
+        }
+    }
+
+    private func recoverAudioAfterFailedRecordingStart() {
+        if let url = audio.endCapture() ?? activeRecordingURL {
+            try? FileManager.default.removeItem(at: url)
+        }
+        activeRecordingURL = nil
+        keyboardMonitorTask?.cancel()
+        keyboardMonitorTask = nil
+        lastKeyboardHeartbeat = nil
+        keyboardHasConnected = false
+
+        do {
+            try prepareStandbyAudio()
+            serviceReady = true
+        } catch {
+            audio.disarm()
+            serviceReady = false
+        }
+        markStateChanged()
+    }
+
+    private func abortOrphanedRecordingToStandby() {
+        if let url = audio.endCapture() ?? activeRecordingURL {
+            try? FileManager.default.removeItem(at: url)
+        }
+        activeRecordingURL = nil
+        activeRequestID = nil
+        responseText = nil
+        resultCreatedAt = nil
+        bridgeStatus = .error
+        bridgeError = ui(
+            "键盘未重新连接，已自动关闭麦克风",
+            "Keyboard did not reconnect. Microphone was closed automatically."
+        )
+        lastError = bridgeError
+        lastKeyboardHeartbeat = nil
+        keyboardHasConnected = false
+
+        do {
+            try prepareStandbyAudio()
+            serviceReady = true
+        } catch {
+            audio.disarm()
+            serviceReady = false
+        }
+        markStateChanged()
+    }
+
     private func performAudioOperationWithRetry(
         _ operation: () throws -> Void
     ) async throws {
@@ -364,25 +468,28 @@ final class AppModel: ObservableObject {
         return code == 560_557_684 || code == 2_003_329_396
     }
 
+    @discardableResult
     private func startRecordingFromKeyboard(
         requestID: String?,
         mode: TranscriptionMode
-    ) {
+    ) -> Bool {
         guard serviceReady, audio.isRunning else {
             publishError(
                 "Open Voice2028 and start Keyboard Service first.",
                 requestID: requestID
             )
-            return
+            recoverAudioAfterFailedRecordingStart()
+            return false
         }
         guard let requestID, !requestID.isEmpty else {
             publishError("Voice2028 received an invalid recording request.")
-            return
+            recoverAudioAfterFailedRecordingStart()
+            return false
         }
         guard bridgeStatus != .recording,
               bridgeStatus != .starting,
               bridgeStatus != .transcribing else {
-            return
+            return bridgeStatus == .recording
         }
 
         bridgeStatus = .starting
@@ -397,8 +504,11 @@ final class AppModel: ObservableObject {
             statusText = ui("录音中…", "Recording…")
             startKeyboardMonitor()
             markStateChanged()
+            return true
         } catch {
             publishError(error.localizedDescription, requestID: requestID)
+            recoverAudioAfterFailedRecordingStart()
+            return false
         }
     }
 
@@ -442,7 +552,8 @@ final class AppModel: ObservableObject {
             let credential = try await auth.validCredential()
             let rawText = try await transcriber.transcribe(
                 audioURL: url,
-                credential: credential
+                credential: credential,
+                language: recognitionLanguage.apiValue
             )
             let text: String
             if activeTranscriptionMode == .smart {
@@ -492,6 +603,7 @@ final class AppModel: ObservableObject {
 
     private func startKeyboardMonitor() {
         keyboardMonitorTask?.cancel()
+        let monitorStartedAt = Date()
         keyboardMonitorTask = Task { [weak self] in
             while !Task.isCancelled {
                 do {
@@ -502,8 +614,20 @@ final class AppModel: ObservableObject {
 
                 guard let self, self.serviceReady else { return }
                 guard self.audio.isRunning else { return }
-                guard self.keyboardHasConnected,
-                      let heartbeat = self.lastKeyboardHeartbeat,
+
+                // Foreground handoff temporarily destroys/recreates the keyboard
+                // extension. A healthy return reconnects quickly. If it never
+                // reconnects, do not leave AVAudioEngine holding the microphone
+                // forever: abandon the orphaned capture and return to standby.
+                if !self.keyboardHasConnected {
+                    if Date().timeIntervalSince(monitorStartedAt) >= 5 {
+                        self.abortOrphanedRecordingToStandby()
+                        return
+                    }
+                    continue
+                }
+
+                guard let heartbeat = self.lastKeyboardHeartbeat,
                       Date().timeIntervalSince(heartbeat) >= LocalBridge.keyboardExitGracePeriod else {
                     continue
                 }

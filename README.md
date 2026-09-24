@@ -4,15 +4,15 @@ Voice2028 is a personal-use iPhone voice keyboard. When its background service i
 
 ## Current interaction
 
-The v0.5.2 flow follows the current Typeless iOS interaction observed in version 2.6.2:
+The v0.4.10 handoff-priority flow follows the current Typeless iOS interaction observed in version 2.6.2:
 
 1. Open a text field and switch to the Voice2028 keyboard.
 2. Tap the central microphone.
-3. If Voice2028 is alive in the background, capture starts without an app switch. If background activation fails, Voice2028 briefly appears, starts capture in the foreground, and automatically returns to the original app.
-4. Speak while the keyboard shows the recording state.
+3. If the microphone is still warm and ready, recording resumes without leaving the current app. If the microphone has gone cold, Voice2028 immediately opens in the foreground, activates the microphone and starts the recording request, then automatically returns to the original app.
+4. Voice2028 keeps the v0.4.2-style mixable play-and-record audio session unchanged while the microphone is warm. Speak while the keyboard shows the recording state.
 5. Tap the microphone again to finish. The keyboard shows processing and inserts the result automatically when it is ready; there is no insertion confirmation.
 
-There is no floating overlay or video-based background mode. Background resume is attempted first; wake-and-return is an automatic recovery path only when the background service cannot start a valid capture.
+There is no floating overlay or video-based background mode. New recordings reuse the warm microphone when it is still ready; once it is cold, Voice2028 skips the failed background restart attempt and goes straight to foreground wake-and-return.
 
 ## Keyboard design
 
@@ -42,10 +42,29 @@ The containing app records on behalf of the keyboard because iOS keyboard extens
 ## Microphone lifecycle
 
 - The microphone starts only after the user taps the Voice2028 voice button.
-- Tapping stop ends file writing immediately. While the Voice2028 keyboard remains visible, the microphone engine stays ready for the next dictation.
 - Leaving the input interface starts a 10-second grace period.
 - If the keyboard does not return during that period, capture stops. An active recording is finished and transcribed; an idle microphone is closed.
-- Voice2028 does not play silent audio in the background. It resumes capture directly only while iOS still allows the app to respond; otherwise the keyboard automatically falls back to foreground wake-and-return.
+- The background service keeps only a silent audio session alive so the localhost bridge remains reachable. It resumes capture directly when iOS permits; otherwise the keyboard automatically falls back to foreground wake-and-return.
+
+## Foreground handoff reliability
+
+- Foreground wake-and-return now restores the v0.4.2 audio-session policy: one stable `.playAndRecord + mixWithOthers` session is configured before AVAudioEngine starts and is not changed when capture begins.
+- The local keyboard bridge is rebuilt during foreground handoff with a fresh server ID so a stale long-running localhost listener cannot survive into the returned keyboard session.
+- Voice2028 returns to the host app only after capture actually enters `recording`; a failed start is cleaned up instead of returning with a half-active microphone.
+- If the returned keyboard never reconnects, an orphaned recording is abandoned after 5 seconds and the microphone is returned to silent standby automatically.
+
+## Fast upload path
+
+- Audio is converted to 16 kHz mono 16-bit PCM while it is being recorded, so stopping dictation no longer starts a second full-file conversion pass.
+- Normal recordings up to 12 MB build multipart data directly in memory and begin upload immediately, avoiding a second multipart temp-file write/read cycle.
+- Longer recordings automatically keep the disk-backed multipart path to bound memory use.
+- If a particular audio route cannot create the 16 kHz converter, Voice2028 falls back to the native recording format instead of failing the recording.
+
+## Faster transcription
+
+- Recognition language is configurable as Chinese (default), Auto, or English. Chinese sends `language=zh`; English sends `language=en`; Auto omits the language hint.
+- Voice2028 records the upload WAV as 16 kHz mono 16-bit PCM in real time when the active audio route supports conversion, removing the post-record conversion delay.
+- The warm-microphone, silent-standby, smart-handoff, cleanup, and auto-insert behavior are otherwise unchanged. Automatic interruption of other-app audio is intentionally disabled in this reliability-first build.
 
 ## Build and sideload
 
@@ -62,7 +81,7 @@ The ChatGPT/Codex endpoints used by this project are undocumented and may change
 
 ## Status
 
-v0.5.2: keeps the v0.5.1 bridge and microphone-safety fixes and clarifies the two microphone-off keyboard states as “service unavailable, tap to wake” and “service online, tap to speak.”
+v0.4.10 handoff-priority test: based on the stable v0.4.2-era code. While the microphone remains warm, a new recording starts without an app switch. Once the microphone is cold, Voice2028 immediately uses foreground wake-and-return instead of first attempting a background microphone restart. Silent-audio standby, warm microphone retention, automatic result insertion, smart cleanup, and spoken-language detection remain preserved.
 
 ## Acknowledgements
 

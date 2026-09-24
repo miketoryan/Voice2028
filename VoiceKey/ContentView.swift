@@ -127,7 +127,7 @@ private struct HomeView: View {
             .safeAreaInset(edge: .top) {
                 HStack {
                     Spacer()
-                    Text("v0.5.2 · build 20")
+                    Text("v0.4.10 · build 35")
                         .font(.caption2)
                         .foregroundStyle(.secondary)
                         .padding(.trailing, 16)
@@ -156,8 +156,25 @@ private struct SettingsView: View {
                     .pickerStyle(.segmented)
 
                     Text(t(
-                        "这里只控制 Voice2028 软件和键盘提示文字。语音输入语言由 ChatGPT 自动识别，可直接混合使用中英文。",
-                        "This only changes Voice2028's app and keyboard text. ChatGPT detects the spoken language automatically, including mixed Chinese and English."
+                        "这里只控制 Voice2028 软件和键盘提示文字。",
+                        "This only changes Voice2028's app and keyboard text."
+                    ))
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                }
+
+                Section(t("识别语言", "Recognition Language")) {
+                    Picker(t("默认识别语言", "Default Recognition Language"), selection: $model.recognitionLanguage) {
+                        ForEach(RecognitionLanguage.allCases) { language in
+                            Text(language.displayName(interfaceLanguage: model.interfaceLanguage))
+                                .tag(language)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+
+                    Text(t(
+                        "默认使用中文可减少每次自动判断语言的开销；整段英文时可切换为 English，中英混合较多时可选“自动”。",
+                        "Chinese is the default to avoid automatic language detection on every request. Choose English for English-only dictation or Auto for heavily mixed speech."
                     ))
                     .font(.footnote)
                     .foregroundStyle(.secondary)
@@ -175,8 +192,8 @@ private struct SettingsView: View {
 
                 Section(t("麦克风", "Microphone")) {
                     Text(t(
-                        "Voice2028 在后台仍可响应时，键盘优先直接启动录音；如果系统已挂起主程序，则自动唤醒主程序恢复。录音结束后停止写入文件，但键盘仍显示时麦克风引擎继续待命；退出输入界面约10秒后关闭麦克风。后台不播放静音音频。",
-                        "When Voice2028 is still responsive in the background, the keyboard starts recording directly. If iOS has suspended the app, Voice2028 wakes automatically for recovery. After recording stops, file writing ends while the microphone engine remains ready as long as the keyboard is visible. The microphone closes about 10 seconds after leaving the input screen. No silent audio is played in the background."
+                        "Voice2028 在后台运行时，键盘优先直接启动录音，不再切换到主程序；只有后台服务失效时才会自动唤醒主程序恢复。退出输入界面10秒后关闭麦克风。",
+                        "When Voice2028 is running in the background, the keyboard starts recording directly without switching apps. It wakes the main app only if background recovery is required. The microphone closes 10 seconds after leaving the input screen."
                     ))
                     .font(.footnote)
                     .foregroundStyle(.secondary)
@@ -226,8 +243,8 @@ private struct HelpView: View {
                         "Tap again to stop. The result is inserted automatically without confirmation."
                     ))
                     Text(t(
-                        "ChatGPT 自动判断输入语言；键盘顶部只保留智能/原文模式切换。",
-                        "ChatGPT detects the spoken language automatically. The keyboard only shows Smart/Verbatim mode selection."
+                        "默认识别语言为中文，可在设置中切换为“自动”或 English；键盘顶部只保留智能/原文模式切换。",
+                        "The default recognition language is Chinese. You can switch to Auto or English in Settings; the keyboard only shows Smart/Verbatim mode selection."
                     ))
                 }
 
@@ -254,7 +271,7 @@ private struct HelpView: View {
                 }
 
                 Section(t("版本", "Version")) {
-                    LabeledContent("Voice2028", value: "0.5.2 · build 20")
+                    LabeledContent("Voice2028", value: "0.4.10 · build 35")
                 }
             }
             .navigationTitle(t("说明", "Help"))

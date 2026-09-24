@@ -1,13 +1,8 @@
 import Foundation
 
 enum LocalBridge {
-    static let port = 14_557
-    static let protocolVersion = "9"
-    // iOS can keep the previous keyboard-extension process alive after an
-    // over-the-top sideload. The containing app must therefore accept the two
-    // preceding wire versions so the old keyboard does not lose its heartbeat
-    // while the newly installed app is already running.
-    static let compatibleProtocolVersions: Set<String> = ["7", "8", "9"]
+    static let port = 14_558
+    static let protocolVersion = "7"
     static let keyboardHeartbeatInterval: Duration = .seconds(2)
     static let keyboardExitGracePeriod: TimeInterval = 10
     static let resultValidity: TimeInterval = 300
@@ -40,7 +35,6 @@ enum InterfaceLanguage: String, Codable, CaseIterable, Sendable {
 enum BridgeAction: String, Codable, Sendable, Equatable {
     case state
     case heartbeat
-    case keyboardHidden
     case startRecording
     case stopRecording
     case acknowledgeResult

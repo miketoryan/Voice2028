@@ -31,7 +31,7 @@ Voice2028 does not copy, modify, or redistribute KeyboardKit source code.
 Voice2028 is a new Swift/iOS implementation and is not affiliated with OpenAI,
 Apple, A3Boy, or VivaDicta.
 
-The current app icon artwork was generated specifically for Voice2028 and then
+The VK app icon artwork was generated specifically for Voice2028 and then
 resized and packaged as an iOS asset catalog.
 
 The ChatGPT/Codex backend endpoints used by Voice2028 are undocumented and may

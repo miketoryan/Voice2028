@@ -77,27 +77,15 @@ final class KeyboardViewController: UIInputViewController {
         keyboardVisible = true
         if currentRequestID != nil { mayAutoInsert = true }
         resolveHostApplicationInAdvance()
-    }
-
-    override func viewDidAppear(_ animated: Bool) {
-        super.viewDidAppear(animated)
         startBridgeTasks()
     }
 
     override func viewWillDisappear(_ animated: Bool) {
-        notifyKeyboardHidden()
         keyboardVisible = false
         mayAutoInsert = false
         insertionScheduledForRequestID = nil
         stopBridgeTasks()
         super.viewWillDisappear(animated)
-    }
-
-    override func viewDidDisappear(_ animated: Bool) {
-        notifyKeyboardHidden()
-        keyboardVisible = false
-        stopBridgeTasks()
-        super.viewDidDisappear(animated)
     }
 
     override func textDidChange(_ textInput: UITextInput?) {
@@ -115,7 +103,7 @@ final class KeyboardViewController: UIInputViewController {
     private func configureUI() {
         view.backgroundColor = .secondarySystemBackground
 
-        brandLabel.text = "V28  Voice2028"
+        brandLabel.text = "VK  Voice2028"
         brandLabel.font = .systemFont(ofSize: 15, weight: .semibold)
         brandLabel.textColor = .label
 
@@ -242,12 +230,14 @@ final class KeyboardViewController: UIInputViewController {
         case .starting, .transcribing:
             break
         default:
-            // If Voice2028 is still alive in the background, ask it to resume
-            // its microphone directly. Only use foreground wake-and-return as
-            // an automatic recovery when background activation really fails.
-            startRecordingRequest(
-                allowForegroundFallback: !latestState.microphoneReady
-            )
+            // Reuse the warm microphone while it is still genuinely ready.
+            // Once the microphone has gone cold, skip the failing background
+            // AVAudioSession restart and immediately use foreground wake-and-return.
+            if latestState.microphoneReady {
+                startRecordingRequest()
+            } else {
+                launchVoice2028AndResumeRecording()
+            }
         }
     }
 
@@ -300,40 +290,14 @@ final class KeyboardViewController: UIInputViewController {
 
     private func sendHeartbeat() async {
         guard keyboardVisible else { return }
-        guard isKeyboardActuallyVisible else {
-            notifyKeyboardHidden()
-            keyboardVisible = false
-            stopBridgeTasks()
-            return
-        }
         do { apply(try await bridge.send(.heartbeat)) }
         catch { applyConnectionFailure() }
     }
 
     private func fetchState() async {
-        guard keyboardVisible, isKeyboardActuallyVisible else { return }
+        guard keyboardVisible else { return }
         do { apply(try await bridge.fetchState()) }
         catch { applyConnectionFailure() }
-    }
-
-    private var isKeyboardActuallyVisible: Bool {
-        guard isViewLoaded,
-              let window = view.window,
-              !window.isHidden,
-              window.alpha > 0,
-              !view.isHidden,
-              view.alpha > 0,
-              !view.bounds.isEmpty else { return false }
-
-        let visibleFrame = view.convert(view.bounds, to: window)
-        return window.bounds.intersects(visibleFrame)
-    }
-
-    private func notifyKeyboardHidden() {
-        let bridge = bridge
-        Task {
-            _ = try? await bridge.send(.keyboardHidden)
-        }
     }
 
     private func sendCommand(
@@ -361,8 +325,8 @@ final class KeyboardViewController: UIInputViewController {
                 }
                 self.latestState = .unavailable(
                     self.localized(
-                        chinese: "服务未连接 · 点击唤醒",
-                        english: "Service unavailable · tap to wake"
+                        chinese: "Voice2028 未响应，点语音按钮可自动唤醒",
+                        english: "Voice2028 did not respond. Tap the microphone to wake it."
                     ),
                     interfaceLanguage: self.latestState.interfaceLanguage
                 )
@@ -495,8 +459,8 @@ final class KeyboardViewController: UIInputViewController {
         }
         latestState = .unavailable(
             localized(
-                chinese: "服务未连接 · 点击唤醒",
-                english: "Service unavailable · tap to wake"
+                chinese: "服务休眠，点语音按钮可自动唤醒",
+                english: "Service is sleeping. Tap the microphone to wake it."
             ),
             interfaceLanguage: latestState.interfaceLanguage
         )
@@ -563,7 +527,7 @@ final class KeyboardViewController: UIInputViewController {
         case .idle:
             statusLabel.text = latestState.microphoneReady
                 ? localized(chinese: "点击说话", english: "Tap to speak")
-                : localized(chinese: "服务在线 · 点击开始说话", english: "Service online · tap to speak")
+                : localized(chinese: "点击说话 · 后台直接启动", english: "Tap to speak · starts in background")
             applyMicStyle(
                 title: localized(chinese: "开始说话", english: "Start speaking"),
                 symbol: "mic.fill",

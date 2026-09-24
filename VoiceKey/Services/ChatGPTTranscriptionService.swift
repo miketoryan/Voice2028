@@ -2,17 +2,14 @@ import Foundation
 
 struct ChatGPTTranscriptionService {
     private let endpoint = URL(string: "https://chatgpt.com/backend-api/transcribe")!
+    private static let inMemoryMultipartLimit = 12 * 1024 * 1024
 
     func transcribe(
         audioURL: URL,
-        credential: ChatGPTAuthManager.Credential
+        credential: ChatGPTAuthManager.Credential,
+        language: String?
     ) async throws -> String {
         let boundary = "Voice2028-\(UUID().uuidString)"
-        let multipartURL = try makeMultipartBodyFile(
-            audioURL: audioURL,
-            boundary: boundary
-        )
-        defer { try? FileManager.default.removeItem(at: multipartURL) }
 
         var request = URLRequest(url: endpoint)
         request.httpMethod = "POST"
@@ -25,7 +22,40 @@ struct ChatGPTTranscriptionService {
         request.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
         request.timeoutInterval = 600
 
-        let (data, response) = try await URLSession.shared.upload(for: request, fromFile: multipartURL)
+        let audioSize = (try? audioURL.resourceValues(
+            forKeys: [.fileSizeKey]
+        ).fileSize) ?? Int.max
+
+        let data: Data
+        let response: URLResponse
+
+        if audioSize <= Self.inMemoryMultipartLimit {
+            // Fast path for normal dictation: avoid writing and rereading a
+            // second multipart temp file before the network request begins.
+            let multipart = try makeMultipartBodyData(
+                audioURL: audioURL,
+                boundary: boundary,
+                language: language
+            )
+            (data, response) = try await URLSession.shared.upload(
+                for: request,
+                from: multipart
+            )
+        } else {
+            // Long recordings keep the disk-backed path so memory usage stays
+            // bounded even though the upload is larger.
+            let multipartURL = try makeMultipartBodyFile(
+                audioURL: audioURL,
+                boundary: boundary,
+                language: language
+            )
+            defer { try? FileManager.default.removeItem(at: multipartURL) }
+            (data, response) = try await URLSession.shared.upload(
+                for: request,
+                fromFile: multipartURL
+            )
+        }
+
         guard let http = response as? HTTPURLResponse else {
             throw TranscriptionError.invalidResponse
         }
@@ -51,9 +81,37 @@ struct ChatGPTTranscriptionService {
         return text.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
+    private func makeMultipartBodyData(
+        audioURL: URL,
+        boundary: String,
+        language: String?
+    ) throws -> Data {
+        var body = Data()
+
+        if let language, !language.isEmpty {
+            body.append(contentsOf: Data(
+                ("--\(boundary)\r\n" +
+                 "Content-Disposition: form-data; name=\"language\"\r\n\r\n" +
+                 "\(language)\r\n").utf8
+            ))
+        }
+
+        body.append(contentsOf: Data(
+            ("--\(boundary)\r\n" +
+             "Content-Disposition: form-data; name=\"file\"; filename=\"\(audioURL.lastPathComponent)\"\r\n" +
+             "Content-Type: audio/wav\r\n\r\n").utf8
+        ))
+        body.append(try Data(contentsOf: audioURL, options: .mappedIfSafe))
+        body.append(contentsOf: Data(
+            "\r\n--\(boundary)--\r\n".utf8
+        ))
+        return body
+    }
+
     private func makeMultipartBodyFile(
         audioURL: URL,
-        boundary: String
+        boundary: String,
+        language: String?
     ) throws -> URL {
         let bodyURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("voice2028-upload-\(UUID().uuidString)")
@@ -66,6 +124,14 @@ struct ChatGPTTranscriptionService {
         do {
             let output = try FileHandle(forWritingTo: bodyURL)
             defer { try? output.close() }
+
+            if let language, !language.isEmpty {
+                try output.write(contentsOf: Data(
+                    ("--\(boundary)\r\n" +
+                     "Content-Disposition: form-data; name=\"language\"\r\n\r\n" +
+                     "\(language)\r\n").utf8
+                ))
+            }
 
             try output.write(contentsOf: Data(
                 ("--\(boundary)\r\n" +

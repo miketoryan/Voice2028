@@ -627,6 +627,13 @@ final class AppModel: ObservableObject {
         }
 
         guard await activateMicrophoneForRecording() else {
+            publishError(
+                bridgeError ?? ui(
+                    "无法在后台启动麦克风",
+                    "Could not start the microphone in the background."
+                ),
+                requestID: requestID
+            )
             recoverAudioAfterFailedRecordingStart()
             return false
         }

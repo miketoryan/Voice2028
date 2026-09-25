@@ -68,7 +68,7 @@ final class OpenLessVoiceBootstrap: NSObject {
             try session.setCategory(
                 .playAndRecord,
                 mode: .default,
-                options: [.mixWithOthers, .defaultToSpeaker, .allowBluetoothHFP]
+                options: [.mixWithOthers, .defaultToSpeaker, .allowBluetooth]
             )
             try session.setActive(true)
 

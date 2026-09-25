@@ -1,5 +1,6 @@
 use serde::Serialize;
 use std::path::PathBuf;
+use tauri::Manager;
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -9,13 +10,31 @@ pub struct ChatGptOAuthStatus {
     pub message: Option<String>,
 }
 
-#[tauri::command]
-pub fn chatgpt_oauth_begin() -> Result<(), String> {
-    let directory = codex_directory()
-        .ok_or_else(|| "OpenLess could not resolve the iOS app home directory".to_string())?;
-
+fn bridge_directory(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+    let documents = app
+        .path()
+        .document_dir()
+        .map_err(|error| format!("OpenLess could not resolve the iOS Documents directory: {error}"))?;
+    let directory = documents.join("OpenLessGPT");
     std::fs::create_dir_all(&directory)
         .map_err(|error| format!("failed to prepare ChatGPT login bridge: {error}"))?;
+    Ok(directory)
+}
+
+fn auth_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+    Ok(bridge_directory(app)?.join("auth.json"))
+}
+
+fn configure_codex_auth_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+    let path = auth_path(app)?;
+    std::env::set_var("OPENLESS_CODEX_AUTH_PATH", &path);
+    Ok(path)
+}
+
+#[tauri::command]
+pub fn chatgpt_oauth_begin(app: tauri::AppHandle) -> Result<(), String> {
+    let directory = bridge_directory(&app)?;
+    let _ = configure_codex_auth_path(&app)?;
 
     let request = serde_json::json!({
         "requestedAt": std::time::SystemTime::now()
@@ -38,17 +57,43 @@ pub fn chatgpt_oauth_begin() -> Result<(), String> {
             .map(|value| value.as_secs_f64())
             .unwrap_or_default()
     });
-    let _ = std::fs::write(
+
+    std::fs::write(
         directory.join("openless-login-state.json"),
         serde_json::to_vec(&state).unwrap_or_default(),
-    );
+    )
+    .map_err(|error| format!("failed to update ChatGPT login state: {error}"))?;
 
     Ok(())
 }
 
 #[tauri::command]
-pub fn chatgpt_oauth_status() -> ChatGptOAuthStatus {
-    let signed_in = openless_core::polish::CodexOAuthCredentials::load_default().is_ok();
+pub fn chatgpt_oauth_status(app: tauri::AppHandle) -> ChatGptOAuthStatus {
+    let directory = match bridge_directory(&app) {
+        Ok(path) => path,
+        Err(message) => {
+            return ChatGptOAuthStatus {
+                state: "error".to_string(),
+                signed_in: false,
+                message: Some(message),
+            }
+        }
+    };
+
+    let auth = match configure_codex_auth_path(&app) {
+        Ok(path) => path,
+        Err(message) => {
+            return ChatGptOAuthStatus {
+                state: "error".to_string(),
+                signed_in: false,
+                message: Some(message),
+            }
+        }
+    };
+
+    let signed_in =
+        openless_core::polish::CodexOAuthCredentials::load_from_path(&auth).is_ok();
+
     if signed_in {
         return ChatGptOAuthStatus {
             state: "signed_in".to_string(),
@@ -59,18 +104,17 @@ pub fn chatgpt_oauth_status() -> ChatGptOAuthStatus {
 
     let mut state = "idle".to_string();
     let mut message = None;
+    let state_path = directory.join("openless-login-state.json");
 
-    if let Some(path) = login_state_path() {
-        if let Ok(raw) = std::fs::read_to_string(path) {
-            if let Ok(json) = serde_json::from_str::<serde_json::Value>(&raw) {
-                if let Some(value) = json.get("state").and_then(|v| v.as_str()) {
-                    state = value.to_string();
-                }
-                message = json
-                    .get("message")
-                    .and_then(|v| v.as_str())
-                    .map(ToOwned::to_owned);
+    if let Ok(raw) = std::fs::read_to_string(state_path) {
+        if let Ok(json) = serde_json::from_str::<serde_json::Value>(&raw) {
+            if let Some(value) = json.get("state").and_then(|v| v.as_str()) {
+                state = value.to_string();
             }
+            message = json
+                .get("message")
+                .and_then(|v| v.as_str())
+                .map(ToOwned::to_owned);
         }
     }
 
@@ -79,25 +123,4 @@ pub fn chatgpt_oauth_status() -> ChatGptOAuthStatus {
         signed_in: false,
         message,
     }
-}
-
-fn codex_directory() -> Option<PathBuf> {
-    #[cfg(target_os = "ios")]
-    {
-        // On iOS the HOME environment variable may resolve to /var/mobile,
-        // which is outside this app's writable sandbox. NSTemporaryDirectory()
-        // and Rust temp_dir() live under <AppContainer>/tmp, so its parent is
-        // the real sandbox home and matches Swift NSHomeDirectory().
-        if let Some(home) = std::env::temp_dir().parent() {
-            return Some(home.join(".codex"));
-        }
-    }
-
-    std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .map(|home| home.join(".codex"))
-}
-
-fn login_state_path() -> Option<PathBuf> {
-    codex_directory().map(|directory| directory.join("openless-login-state.json"))
 }

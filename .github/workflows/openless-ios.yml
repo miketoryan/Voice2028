@@ -277,23 +277,19 @@ jobs:
           # 4) Mark the GPT ASR channel configured from the same Codex/ChatGPT OAuth file.
           p = Path("src-tauri/src/commands/credentials.rs")
           text = p.read_text()
-          old = '''    openless_core::provider_rules::asr_configured(
-              provider,
-              &credential_configuration(snap, "", false),
-              local_asr_configured(provider, model_store),
-          )
+          if 'provider == "chatgpt_oauth"' not in text:
+              fn_pos = text.find("fn asr_configured_for_provider_with_model_store(")
+              if fn_pos < 0:
+                  raise SystemExit("credentials ASR configured function missing")
+              body_pos = text.find("{", fn_pos)
+              if body_pos < 0:
+                  raise SystemExit("credentials ASR configured body missing")
+              addition = '''
+              if provider == "chatgpt_oauth" {
+                  return CodexOAuthCredentials::load_default().is_ok();
+              }
           '''
-          new = '''    let chatgpt_oauth =
-              provider == "chatgpt_oauth" && CodexOAuthCredentials::load_default().is_ok();
-          openless_core::provider_rules::asr_configured(
-              provider,
-              &credential_configuration(snap, "", chatgpt_oauth),
-              local_asr_configured(provider, model_store),
-          )
-          '''
-          if old not in text:
-              raise SystemExit("credentials ASR configured anchor missing")
-          text = text.replace(old, new, 1)
+              text = text[:body_pos + 1] + addition + text[body_pos + 1:]
           p.write_text(text)
 
           # 5) Keep OpenLess' channel UI. OAuth channels simply show the shared-login notice;
@@ -305,10 +301,12 @@ jobs:
               "  ['codex_oauth', 'gptSmartCleanup'],",
               1,
           )
-          oauth_anchor = """  // 本地引擎（qwen3 / sherpa / foundry / Apple 语音）没有 key 与地址；模型的下载与
-          // 切换仍由「高级 → 本地模型」里的 <LocalAsr embedded /> 负责，这里只说明一句。
-          """
-          oauth_block = """  if (descriptor?.authRequirement === 'o_auth') {
+          if "settings.providers.chatgptOAuthNotice" not in text:
+              oauth_anchor = "  if (descriptor?.authRequirement === 'none') {"
+              anchor_pos = text.find(oauth_anchor)
+              if anchor_pos < 0:
+                  raise SystemExit("ProvidersSection local-provider branch missing")
+              oauth_block = """  if (descriptor?.authRequirement === 'o_auth') {
             return (
               <div style={{ fontSize: 11.5, color: 'var(--ol-ink-4)', lineHeight: 1.6 }}>
                 {t('settings.providers.chatgptOAuthNotice')}
@@ -316,11 +314,8 @@ jobs:
             );
           }
 
-          """ + oauth_anchor
-          if "settings.providers.chatgptOAuthNotice" not in text:
-              if oauth_anchor not in text:
-                  raise SystemExit("ProvidersSection OAuth anchor missing")
-              text = text.replace(oauth_anchor, oauth_block, 1)
+          """
+              text = text[:anchor_pos] + oauth_block + text[anchor_pos:]
           p.write_text(text)
 
           # 6) Localized labels only; do not alter the rest of Settings UI.

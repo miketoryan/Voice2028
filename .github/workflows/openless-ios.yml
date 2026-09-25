@@ -329,29 +329,35 @@ jobs:
           )
           p.write_text(text)
 
-          # iOS HOME can point outside the writable app sandbox. Make OpenLess'
-          # native Codex OAuth resolver use the actual container root derived from tmp/.
-          p = Path("crates/openless-core/src/polish.rs")
+          # On iOS configure OpenLess Codex OAuth to use the same
+          # Documents/OpenLessGPT/auth.json path from app startup onward.
+          p = Path("src-tauri/src/mobile_runtime.rs")
           text = p.read_text()
-          old_home = """fn default_codex_home_dir() -> Option<PathBuf> {
-              if let Some(home) = non_empty_env_path("HOME") {
-                  return Some(home);
-              }
+          setup_anchor = """        .setup(|app| {
+            #[cfg(target_os = "android")]
           """
-          new_home = """fn default_codex_home_dir() -> Option<PathBuf> {
-              #[cfg(target_os = "ios")]
-              {
-                  if let Some(home) = std::env::temp_dir().parent() {
-                      return Some(home.to_path_buf());
-                  }
-              }
-              if let Some(home) = non_empty_env_path("HOME") {
-                  return Some(home);
-              }
+          setup_addition = """        .setup(|app| {
+            #[cfg(target_os = "ios")]
+            {
+                use tauri::Manager;
+                let documents = app
+                    .path()
+                    .document_dir()
+                    .map_err(|error| format!("resolve iOS Documents directory: {error}"))?;
+                let directory = documents.join("OpenLessGPT");
+                std::fs::create_dir_all(&directory)?;
+                std::env::set_var(
+                    "OPENLESS_CODEX_AUTH_PATH",
+                    directory.join("auth.json"),
+                );
+            }
+
+            #[cfg(target_os = "android")]
           """
-          if old_home not in text:
-              raise SystemExit("default_codex_home_dir anchor missing")
-          text = text.replace(old_home, new_home, 1)
+          if 'OPENLESS_CODEX_AUTH_PATH' not in text:
+              if setup_anchor not in text:
+                  raise SystemExit("mobile runtime setup anchor missing")
+              text = text.replace(setup_anchor, setup_addition, 1)
           p.write_text(text)
 
           # 4) Mark the GPT ASR channel configured from the same Codex/ChatGPT OAuth file.
@@ -472,8 +478,9 @@ jobs:
           cp "$GITHUB_WORKSPACE/adapter/openless-ios/OpenLessProviders/ChatGPTOAuthBridge.rs" "src-tauri/src/chatgpt_bridge.rs"
           cp "$GITHUB_WORKSPACE/adapter/openless-ios/OpenLessProviders/ChatGPTLoginControl.tsx" "src/pages/settings/ChatGPTLoginControl.tsx"
           python3 "$GITHUB_WORKSPACE/adapter/openless-ios/scripts/wire_gpt_login.py"
-          grep -q "openless-login-request.json" src-tauri/src/chatgpt_bridge.rs
-          grep -q "consumeLoginRequestIfPresent" src-tauri/gen/apple/OpenLessVoiceHost/OpenLessVoiceBootstrap.swift
+          grep -q "document_dir()" src-tauri/src/chatgpt_bridge.rs
+          grep -q "OPENLESS_CODEX_AUTH_PATH" src-tauri/src/mobile_runtime.rs
+          grep -q "OpenLessGPT" src-tauri/gen/apple/OpenLessVoiceHost/OpenLessVoiceBootstrap.swift
 
       - name: Add OpenLess original-style iOS keyboard extension
         working-directory: upstream/openless-all/app

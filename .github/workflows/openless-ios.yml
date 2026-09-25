@@ -319,7 +319,16 @@ jobs:
           p.write_text(text)
 
           # 6) Localized labels only; preserve OpenLess' existing translation keys.
-          locale_files = list(Path("src/i18n").glob("*.ts"))
+          locale_files = [
+              Path("src/i18n/en.ts"),
+              Path("src/i18n/zh-CN.ts"),
+              Path("src/i18n/zh-TW.ts"),
+              Path("src/i18n/ja.ts"),
+              Path("src/i18n/ko.ts"),
+              Path("src/i18n/de.ts"),
+              Path("src/i18n/fr.ts"),
+              Path("src/i18n/es.ts"),
+          ]
           for q in locale_files:
               body = q.read_text()
 

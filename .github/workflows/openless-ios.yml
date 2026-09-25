@@ -23,12 +23,12 @@ jobs:
           submodules: recursive
           fetch-depth: 1
 
-      - name: Checkout VoiceKey keyboard reference
+      - name: Checkout iOS adapter branch
         uses: actions/checkout@v4
         with:
-          repository: miketoryan/VoiceKey
-          ref: main
-          path: voicekey-ref
+          repository: miketoryan/Voice2028
+          ref: openless-ios
+          path: adapter
           fetch-depth: 1
 
       - name: Setup Node
@@ -125,20 +125,25 @@ jobs:
           CI: "true"
         run: npx tauri ios init --ci
 
-      - name: Add real iOS keyboard extension
+      - name: Add OpenLess original-style iOS keyboard extension
         working-directory: upstream/openless-all/app
         shell: bash
         run: |
           set -euo pipefail
 
           GEN_APPLE="src-tauri/gen/apple"
-          mkdir -p "$GEN_APPLE/OpenLessKeyboard"
+          SRC_DIR="$GITHUB_WORKSPACE/adapter/openless-ios/OpenLessKeyboard"
+          EXT_DIR="$GEN_APPLE/OpenLessKeyboard"
+          mkdir -p "$EXT_DIR"
 
-          cp "$GITHUB_WORKSPACE/voicekey-ref/VoiceKeyKeyboard/KeyboardViewController.swift"              "$GEN_APPLE/OpenLessKeyboard/KeyboardViewController.swift"
-          cp "$GITHUB_WORKSPACE/voicekey-ref/Shared/SharedBridge.swift"              "$GEN_APPLE/OpenLessKeyboard/SharedBridge.swift"
-          cp "$GITHUB_WORKSPACE/voicekey-ref/VoiceKeyKeyboard/Info.plist"              "$GEN_APPLE/OpenLessKeyboard/Info.plist"
+          cp "$SRC_DIR/KeyboardViewController.swift" "$EXT_DIR/KeyboardViewController.swift"
+          cp "$SRC_DIR/Info.plist" "$EXT_DIR/Info.plist"
 
-          /usr/libexec/PlistBuddy -c "Set :CFBundleDisplayName OpenLess"             "$GEN_APPLE/OpenLessKeyboard/Info.plist"
+          # Reuse OpenLess' own keyboard assets/dictionaries instead of VoiceKey assets.
+          cp "$GITHUB_WORKSPACE/upstream/openless-all/app/android/assets/openless_wordmark.png" "$EXT_DIR/openless_wordmark.png"
+          cp "$GITHUB_WORKSPACE/upstream/openless-all/app/android/assets/stroke.dict.tsv" "$EXT_DIR/stroke.dict.tsv"
+          cp "$GITHUB_WORKSPACE/upstream/openless-all/app/android/assets/stroke-frequency.tsv" "$EXT_DIR/stroke-frequency.tsv"
+          cp "$GITHUB_WORKSPACE/upstream/openless-all/app/android/assets/phrases.dict.tsv" "$EXT_DIR/phrases.dict.tsv"
 
           gem install xcodeproj --no-document
 
@@ -152,24 +157,40 @@ jobs:
           abort('OpenLess iOS target not found') unless main_target
 
           ext_target = project.targets.find { |t| t.name == 'OpenLessKeyboard' }
-          unless ext_target
-            ext_target = project.new_target(:app_extension, 'OpenLessKeyboard', :ios, '17.0')
-          end
+          ext_target ||= project.new_target(:app_extension, 'OpenLessKeyboard', :ios, '17.0')
 
-          keyboard_group = project.main_group.groups.find { |g| g.display_name == 'OpenLessKeyboard' }
-          keyboard_group ||= project.main_group.new_group('OpenLessKeyboard', 'OpenLessKeyboard')
+          group = project.main_group.groups.find { |g| g.display_name == 'OpenLessKeyboard' }
+          group ||= project.main_group.new_group('OpenLessKeyboard', 'OpenLessKeyboard')
 
           refs = {}
-          %w[KeyboardViewController.swift SharedBridge.swift Info.plist].each do |name|
-            ref = keyboard_group.files.find { |f| f.path == name }
-            ref ||= keyboard_group.new_file(name)
+          %w[
+            KeyboardViewController.swift
+            Info.plist
+            openless_wordmark.png
+            stroke.dict.tsv
+            stroke-frequency.tsv
+            phrases.dict.tsv
+          ].each do |name|
+            ref = group.files.find { |f| f.path == name }
+            ref ||= group.new_file(name)
             refs[name] = ref
           end
 
-          source_refs = [refs['KeyboardViewController.swift'], refs['SharedBridge.swift']]
-          existing_source_refs = ext_target.source_build_phase.files_references
-          source_refs.each do |ref|
-            ext_target.source_build_phase.add_file_reference(ref, true) unless existing_source_refs.include?(ref)
+          source_ref = refs['KeyboardViewController.swift']
+          unless ext_target.source_build_phase.files_references.include?(source_ref)
+            ext_target.source_build_phase.add_file_reference(source_ref, true)
+          end
+
+          %w[
+            openless_wordmark.png
+            stroke.dict.tsv
+            stroke-frequency.tsv
+            phrases.dict.tsv
+          ].each do |name|
+            ref = refs[name]
+            unless ext_target.resources_build_phase.files_references.include?(ref)
+              ext_target.resources_build_phase.add_file_reference(ref, true)
+            end
           end
 
           ext_target.build_configurations.each do |config|
@@ -186,7 +207,9 @@ jobs:
             s['CODE_SIGNING_REQUIRED'] = 'NO'
           end
 
-          main_target.add_dependency(ext_target) unless main_target.dependencies.any? { |d| d.target == ext_target }
+          unless main_target.dependencies.any? { |d| d.target == ext_target }
+            main_target.add_dependency(ext_target)
+          end
 
           embed = main_target.copy_files_build_phases.find { |p| p.name == 'Embed App Extensions' }
           embed ||= main_target.new_copy_files_build_phase('Embed App Extensions')
@@ -200,7 +223,7 @@ jobs:
           project.save
           RUBY
 
-          echo "Targets after keyboard injection:"
+          echo "Injected targets:"
           xcodebuild -project "$GEN_APPLE/openless.xcodeproj" -list
 
       - name: Build unsigned iOS IPA
@@ -231,13 +254,16 @@ jobs:
             APP_ID=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$APP_PATH/Info.plist")
             KEYBOARD_ID=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$APP_PATH/PlugIns/OpenLessKeyboard.appex/Info.plist")
             EXT_POINT=$(/usr/libexec/PlistBuddy -c 'Print :NSExtension:NSExtensionPointIdentifier' "$APP_PATH/PlugIns/OpenLessKeyboard.appex/Info.plist")
+            KEYBOARD_NAME=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleDisplayName' "$APP_PATH/PlugIns/OpenLessKeyboard.appex/Info.plist")
 
             echo "Main bundle: $APP_ID"
             echo "Keyboard bundle: $KEYBOARD_ID"
+            echo "Keyboard display name: $KEYBOARD_NAME"
             echo "Extension point: $EXT_POINT"
 
             test "$APP_ID" = "com.miketoryan.VoiceKey"
             test "$KEYBOARD_ID" = "com.miketoryan.VoiceKey.Keyboard"
+            test "$KEYBOARD_NAME" = "OpenLess"
             test "$EXT_POINT" = "com.apple.keyboard-service"
           fi
           if [ -d upstream/openless-all/app/src-tauri/gen/apple/build ]; then

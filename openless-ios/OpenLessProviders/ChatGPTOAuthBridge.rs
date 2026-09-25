@@ -11,35 +11,37 @@ pub struct ChatGptOAuthStatus {
 
 #[tauri::command]
 pub fn chatgpt_oauth_begin() -> Result<(), String> {
-    #[cfg(target_os = "ios")]
-    {
-        return invoke_ios_login_symbol();
-    }
+    let directory = codex_directory()
+        .ok_or_else(|| "OpenLess could not resolve the iOS app home directory".to_string())?;
 
-    #[allow(unreachable_code)]
-    Err("ChatGPT OAuth bridge is only available on iOS".to_string())
-}
+    std::fs::create_dir_all(&directory)
+        .map_err(|error| format!("failed to prepare ChatGPT login bridge: {error}"))?;
 
-#[cfg(target_os = "ios")]
-fn invoke_ios_login_symbol() -> Result<(), String> {
-    use std::ffi::CString;
+    let request = serde_json::json!({
+        "requestedAt": std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|value| value.as_secs_f64())
+            .unwrap_or_default()
+    });
 
-    type LoginFn = unsafe extern "C" fn();
+    std::fs::write(
+        directory.join("openless-login-request.json"),
+        serde_json::to_vec(&request)
+            .map_err(|error| format!("failed to encode ChatGPT login request: {error}"))?,
+    )
+    .map_err(|error| format!("failed to submit ChatGPT login request: {error}"))?;
 
-    let symbol_name = CString::new("openless_chatgpt_begin_login")
-        .map_err(|error| format!("invalid native login symbol name: {error}"))?;
-
-    unsafe {
-        let symbol = libc::dlsym(libc::RTLD_DEFAULT, symbol_name.as_ptr());
-        if symbol.is_null() {
-            return Err(
-                "OpenLess iOS ChatGPT login bridge is unavailable in this build".to_string()
-            );
-        }
-
-        let login: LoginFn = std::mem::transmute(symbol);
-        login();
-    }
+    let state = serde_json::json!({
+        "state": "opening",
+        "updatedAt": std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|value| value.as_secs_f64())
+            .unwrap_or_default()
+    });
+    let _ = std::fs::write(
+        directory.join("openless-login-state.json"),
+        serde_json::to_vec(&state).unwrap_or_default(),
+    );
 
     Ok(())
 }
@@ -79,8 +81,12 @@ pub fn chatgpt_oauth_status() -> ChatGptOAuthStatus {
     }
 }
 
-fn login_state_path() -> Option<PathBuf> {
+fn codex_directory() -> Option<PathBuf> {
     std::env::var_os("HOME")
         .map(PathBuf::from)
-        .map(|home| home.join(".codex").join("openless-login-state.json"))
+        .map(|home| home.join(".codex"))
+}
+
+fn login_state_path() -> Option<PathBuf> {
+    codex_directory().map(|directory| directory.join("openless-login-state.json"))
 }

@@ -59,6 +59,7 @@ final class OpenLessVoiceBootstrap: NSObject {
         ])
 
         loginButton = button
+        auth.presentationWindow = window
         refreshLoginButton(ready: auth.isSignedIn)
     }
 
@@ -67,6 +68,7 @@ final class OpenLessVoiceBootstrap: NSObject {
 
         Task { @MainActor in
             do {
+                auth.presentationWindow = loginButton?.window ?? keyWindow()
                 if !auth.isSignedIn {
                     loginButton?.setTitle("登录中…", for: .normal)
                     try await auth.signIn()
@@ -74,6 +76,7 @@ final class OpenLessVoiceBootstrap: NSObject {
                 await syncCredentialIfPossible()
             } catch {
                 loginButton?.setTitle("登录 GPT", for: .normal)
+                presentLoginError(error)
             }
         }
     }
@@ -127,6 +130,26 @@ final class OpenLessVoiceBootstrap: NSObject {
             to: directory.appendingPathComponent("auth.json"),
             options: .atomic
         )
+    }
+
+    private func presentLoginError(_ error: Error) {
+        guard let window = keyWindow(),
+              let root = window.rootViewController else { return }
+
+        var presenter = root
+        while let presented = presenter.presentedViewController {
+            presenter = presented
+        }
+
+        let message = (error as? LocalizedError)?.errorDescription
+            ?? error.localizedDescription
+        let alert = UIAlertController(
+            title: "GPT 登录失败",
+            message: message,
+            preferredStyle: .alert
+        )
+        alert.addAction(UIAlertAction(title: "好", style: .default))
+        presenter.present(alert, animated: true)
     }
 
     private func refreshLoginButton(ready: Bool) {

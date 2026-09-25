@@ -1,12 +1,6 @@
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
 
-extern void openless_chatgpt_begin_login(void);
-// Rust resolves this symbol with dlsym at runtime. Keep an Objective-C reference
-// so the app linker cannot dead-strip the Swift @_cdecl entry point.
-__attribute__((used))
-static void (*const OpenLessKeepChatGPTLoginSymbol)(void) = openless_chatgpt_begin_login;
-
 __attribute__((constructor))
 static void OpenLessVoiceBootstrapConstructor(void) {
     dispatch_async(dispatch_get_main_queue(), ^{

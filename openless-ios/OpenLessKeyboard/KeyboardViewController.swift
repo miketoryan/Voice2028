@@ -40,7 +40,7 @@ private struct StrokeEntry {
     let code: String
 }
 
-private final class StrokeRepository {
+private final class StrokeRepository: @unchecked Sendable {
     static let shared = StrokeRepository()
 
     private let queue = DispatchQueue(label: "com.openless.ios.stroke", qos: .userInitiated)
@@ -438,8 +438,12 @@ final class KeyboardViewController: UIInputViewController {
     }
 
     private func openHost(action: String) {
-        guard let url = URL(string: "openless://keyboard?action=\(action)") else { return }
-        extensionContext?.open(url, completionHandler: nil)
+        guard let primary = URL(string: "openless://keyboard?action=\(action)") else { return }
+        extensionContext?.open(primary) { [weak self] success in
+            guard !success,
+                  let fallback = URL(string: "voicekey://keyboard?action=\(action)") else { return }
+            self?.extensionContext?.open(fallback, completionHandler: nil)
+        }
     }
 
     private func buildEnglish(into root: UIStackView) {

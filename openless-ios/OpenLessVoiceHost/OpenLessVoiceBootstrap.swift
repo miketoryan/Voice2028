@@ -47,7 +47,12 @@ final class OpenLessVoiceBootstrap: NSObject {
         button.titleLabel?.font = .systemFont(ofSize: 12, weight: .semibold)
         button.layer.borderWidth = 0.5
         button.layer.borderColor = UIColor.separator.cgColor
-        button.addTarget(self, action: #selector(loginTapped), for: .touchUpInside)
+        button.addAction(
+            UIAction { [weak self] _ in
+                self?.beginLogin()
+            },
+            for: .touchUpInside
+        )
         button.translatesAutoresizingMaskIntoConstraints = false
 
         window.addSubview(button)
@@ -63,14 +68,22 @@ final class OpenLessVoiceBootstrap: NSObject {
         refreshLoginButton(ready: auth.isSignedIn)
     }
 
-    @objc private func loginTapped() {
+    private func beginLogin() {
         guard !syncing else { return }
 
+        // Change the title synchronously before starting any async work.
+        // If this text does not appear, the control event itself did not fire.
+        loginButton?.setTitle("正在打开 GPT…", for: .normal)
+        loginButton?.isEnabled = false
+
         Task { @MainActor in
+            defer {
+                self.loginButton?.isEnabled = true
+            }
+
             do {
                 auth.presentationWindow = loginButton?.window ?? keyWindow()
                 if !auth.isSignedIn {
-                    loginButton?.setTitle("登录中…", for: .normal)
                     try await auth.signIn()
                 }
                 await syncCredentialIfPossible()

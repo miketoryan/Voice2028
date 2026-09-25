@@ -15,19 +15,45 @@ const PROTOCOL_VERSION: &str = "7";
 
 static NATIVE_AUDIO_BRIDGE: OnceLock<Weak<KeyboardBridge>> = OnceLock::new();
 
-unsafe extern "C" {
-    fn OpenLessNativeAudioStart() -> bool;
-    fn OpenLessNativeAudioStop();
+type NativeAudioStart = extern "C" fn() -> bool;
+type NativeAudioStop = extern "C" fn();
+
+#[derive(Clone, Copy)]
+struct NativeAudioCallbacks {
+    start: NativeAudioStart,
+    stop: NativeAudioStop,
+}
+
+static NATIVE_AUDIO_CALLBACKS: OnceLock<NativeAudioCallbacks> = OnceLock::new();
+
+/// The iOS host registers its AVAudioEngine capture callbacks at process
+/// startup. Keeping the dependency in this direction is important: the Rust
+/// static library can be built by Cargo without trying to resolve Objective-C
+/// symbols that only exist later when Xcode links the final app executable.
+#[unsafe(no_mangle)]
+pub extern "C" fn openless_ios_register_native_audio_callbacks(
+    start: NativeAudioStart,
+    stop: NativeAudioStop,
+) -> bool {
+    if NATIVE_AUDIO_CALLBACKS.get().is_some() {
+        return true;
+    }
+    NATIVE_AUDIO_CALLBACKS
+        .set(NativeAudioCallbacks { start, stop })
+        .is_ok()
 }
 
 fn start_native_audio() -> bool {
-    // The symbol is supplied by OpenLessVoiceBootstrap.m in the iOS host.
-    unsafe { OpenLessNativeAudioStart() }
+    NATIVE_AUDIO_CALLBACKS
+        .get()
+        .map(|callbacks| (callbacks.start)())
+        .unwrap_or(false)
 }
 
 fn stop_native_audio() {
-    // The symbol is supplied by OpenLessVoiceBootstrap.m in the iOS host.
-    unsafe { OpenLessNativeAudioStop() }
+    if let Some(callbacks) = NATIVE_AUDIO_CALLBACKS.get() {
+        (callbacks.stop)();
+    }
 }
 
 #[unsafe(no_mangle)]

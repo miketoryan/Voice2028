@@ -1,16 +1,14 @@
 import Foundation
 import UIKit
-import ObjectiveC.runtime
 
 @MainActor
 @objc(OpenLessVoiceBootstrap)
 final class OpenLessVoiceBootstrap: NSObject {
     @objc static let shared = OpenLessVoiceBootstrap()
 
-    private let model = AppModel()
+    private let auth = ChatGPTAuthManager()
     private var loginButton: UIButton?
-    private var hookInstalled = false
-    private var originalOpenURLIMP: IMP?
+    private var syncing = false
 
     @objc func start() {
         NotificationCenter.default.addObserver(
@@ -22,72 +20,18 @@ final class OpenLessVoiceBootstrap: NSObject {
 
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
             guard let self else { return }
-            self.installURLHookIfPossible()
             self.ensureLoginButton()
-            if self.model.signedIn {
-                Task { @MainActor in
-                    await self.model.startService()
-                    self.refreshLoginButton()
-                }
+            Task { @MainActor in
+                await self.syncCredentialIfPossible()
             }
         }
     }
 
     @objc private func applicationDidBecomeActive() {
-        installURLHookIfPossible()
         ensureLoginButton()
-        refreshLoginButton()
-    }
-
-    private func installURLHookIfPossible() {
-        guard !hookInstalled,
-              let delegate = UIApplication.shared.delegate else { return }
-
-        let cls: AnyClass = type(of: delegate)
-        let selector = NSSelectorFromString("application:openURL:options:")
-        originalOpenURLIMP = class_getMethodImplementation(cls, selector)
-
-        typealias OpenBlock = @convention(block) (
-            AnyObject,
-            UIApplication,
-            NSURL,
-            NSDictionary
-        ) -> Bool
-
-        let block: OpenBlock = { [weak self] object, application, nsURL, options in
-            guard let self else { return false }
-            let url = nsURL as URL
-            let scheme = url.scheme?.lowercased() ?? ""
-
-            if scheme == "voiceking" {
-                Task { @MainActor in
-                    await self.model.handleIncomingURL(url)
-                    self.refreshLoginButton()
-                }
-                return true
-            }
-
-            if let original = self.originalOpenURLIMP {
-                typealias Original = @convention(c) (
-                    AnyObject,
-                    Selector,
-                    UIApplication,
-                    NSURL,
-                    NSDictionary
-                ) -> Bool
-                let fn = unsafeBitCast(original, to: Original.self)
-                return fn(object, selector, application, nsURL, options)
-            }
-            return false
+        Task { @MainActor in
+            await syncCredentialIfPossible()
         }
-
-        let imp = imp_implementationWithBlock(block)
-        if let method = class_getInstanceMethod(cls, selector) {
-            method_setImplementation(method, imp)
-        } else {
-            class_addMethod(cls, selector, imp, "B@:@@@")
-        }
-        hookInstalled = true
     }
 
     private func ensureLoginButton() {
@@ -115,31 +59,83 @@ final class OpenLessVoiceBootstrap: NSObject {
         ])
 
         loginButton = button
-        refreshLoginButton()
+        refreshLoginButton(ready: auth.isSignedIn)
     }
 
-    private func refreshLoginButton() {
-        if model.signedIn {
+    @objc private func loginTapped() {
+        guard !syncing else { return }
+
+        Task { @MainActor in
+            do {
+                if !auth.isSignedIn {
+                    loginButton?.setTitle("登录中…", for: .normal)
+                    try await auth.signIn()
+                }
+                await syncCredentialIfPossible()
+            } catch {
+                loginButton?.setTitle("登录 GPT", for: .normal)
+            }
+        }
+    }
+
+    private func syncCredentialIfPossible() async {
+        guard auth.isSignedIn, !syncing else {
+            refreshLoginButton(ready: false)
+            return
+        }
+
+        syncing = true
+        defer { syncing = false }
+
+        do {
+            let credential = try await auth.validCredential()
+            guard let accountId = credential.accountId?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !accountId.isEmpty else {
+                refreshLoginButton(ready: false)
+                return
+            }
+
+            try writeCodexAuth(
+                accessToken: credential.accessToken,
+                accountId: accountId
+            )
+            refreshLoginButton(ready: true)
+        } catch {
+            refreshLoginButton(ready: false)
+        }
+    }
+
+    private func writeCodexAuth(accessToken: String, accountId: String) throws {
+        let home = URL(fileURLWithPath: NSHomeDirectory(), isDirectory: true)
+        let directory = home.appendingPathComponent(".codex", isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: directory,
+            withIntermediateDirectories: true
+        )
+
+        let payload: [String: Any] = [
+            "tokens": [
+                "access_token": accessToken,
+                "account_id": accountId
+            ]
+        ]
+        let data = try JSONSerialization.data(
+            withJSONObject: payload,
+            options: [.prettyPrinted, .sortedKeys]
+        )
+        try data.write(
+            to: directory.appendingPathComponent("auth.json"),
+            options: .atomic
+        )
+    }
+
+    private func refreshLoginButton(ready: Bool) {
+        if ready {
             loginButton?.setTitle("GPT 已登录", for: .normal)
             loginButton?.accessibilityLabel = "ChatGPT 已登录"
         } else {
             loginButton?.setTitle("登录 GPT", for: .normal)
             loginButton?.accessibilityLabel = "登录 ChatGPT"
-        }
-    }
-
-    @objc private func loginTapped() {
-        if model.signedIn {
-            Task { @MainActor in
-                await model.startService()
-                refreshLoginButton()
-            }
-            return
-        }
-
-        Task { @MainActor in
-            await model.signIn()
-            refreshLoginButton()
         }
     }
 

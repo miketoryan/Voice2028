@@ -35,6 +35,7 @@ final class OpenLessVoiceBootstrap: NSObject {
         )
 
         startBridgePolling()
+        requestMicrophonePermissionIfNeeded()
         startBackgroundKeepAliveIfNeeded()
 
         Task { @MainActor in
@@ -43,6 +44,7 @@ final class OpenLessVoiceBootstrap: NSObject {
     }
 
     @objc private func applicationDidBecomeActive() {
+        requestMicrophonePermissionIfNeeded()
         startBackgroundKeepAliveIfNeeded()
         Task { @MainActor in
             await syncCredentialIfPossible()
@@ -123,14 +125,54 @@ final class OpenLessVoiceBootstrap: NSObject {
     /// C shim. Capture uses the already-running keep-alive engine, while Core
     /// still owns the session, provider resolution, transcription and history.
     @objc func startNativeAudioCapture() -> NSNumber {
-        startBackgroundKeepAliveIfNeeded()
+        let session = AVAudioSession.sharedInstance()
+
+        guard session.recordPermission == .granted else {
+            let message: String
+            switch session.recordPermission {
+            case .denied:
+                message = "OpenLess 没有麦克风权限，请先在系统设置中允许麦克风。"
+            case .undetermined:
+                message = "OpenLess 尚未获得麦克风权限，请先打开主程序完成授权。"
+            @unknown default:
+                message = "OpenLess 无法确认麦克风权限状态。"
+            }
+            nativeAudioError = message
+            NSLog("[OpenLess Audio] native capture permission blocked: %@", message)
+            return NSNumber(value: false)
+        }
+
         do {
+            // The keep-alive graph was started as playback-only. On iOS its
+            // input node can remain uninitialised (0 Hz / 0 channels) until the
+            // graph is rebuilt with an input tap. Stop only this SAME engine,
+            // install the mic tap, then restart it; do not create a second
+            // RemoteIO/CPAL input graph.
+            if keepAliveEngine.isRunning {
+                keepAliveEngine.stop()
+            }
+
+            try session.setCategory(
+                .playAndRecord,
+                mode: .default,
+                options: [.mixWithOthers, .defaultToSpeaker, .allowBluetooth]
+            )
+            try session.setActive(true)
+
             try nativeAudioCapture.start()
+            keepAliveEngine.prepare()
+            try keepAliveEngine.start()
+            if !keepAlivePlayer.isPlaying {
+                keepAlivePlayer.play()
+            }
+
             nativeAudioError = nil
             return NSNumber(value: true)
         } catch {
+            nativeAudioCapture.stop()
             nativeAudioError = error.localizedDescription
             NSLog("[OpenLess Audio] native capture start failed: %@", error.localizedDescription)
+            startBackgroundKeepAliveIfNeeded(forceRestart: true)
             return NSNumber(value: false)
         }
     }
@@ -141,6 +183,15 @@ final class OpenLessVoiceBootstrap: NSObject {
 
     @objc func nativeAudioCaptureError() -> NSString? {
         nativeAudioError as NSString?
+    }
+
+    private func requestMicrophonePermissionIfNeeded() {
+        let session = AVAudioSession.sharedInstance()
+        guard session.recordPermission == .undetermined else { return }
+
+        session.requestRecordPermission { granted in
+            NSLog("[OpenLess Audio] microphone permission result: %@", granted ? "granted" : "denied")
+        }
     }
 
     private func startBridgePolling() {

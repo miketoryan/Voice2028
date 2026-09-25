@@ -1,4 +1,5 @@
 import Foundation
+import ObjectiveC.runtime
 import UIKit
 
 @MainActor
@@ -9,6 +10,8 @@ final class OpenLessVoiceBootstrap: NSObject {
     private let auth = ChatGPTAuthManager()
     private var loginRunning = false
     private var bridgeTimer: Timer?
+    private var urlHookInstalled = false
+    private var originalOpenURLIMP: IMP?
 
     @objc func start() {
         NotificationCenter.default.addObserver(
@@ -19,6 +22,7 @@ final class OpenLessVoiceBootstrap: NSObject {
         )
 
         startBridgePolling()
+        installURLHookIfPossible()
 
         Task { @MainActor in
             await self.syncCredentialIfPossible()
@@ -26,8 +30,111 @@ final class OpenLessVoiceBootstrap: NSObject {
     }
 
     @objc private func applicationDidBecomeActive() {
+        installURLHookIfPossible()
         Task { @MainActor in
             await syncCredentialIfPossible()
+        }
+    }
+
+    private func installURLHookIfPossible() {
+        guard !urlHookInstalled,
+              let delegate = UIApplication.shared.delegate else { return }
+
+        let cls: AnyClass = type(of: delegate)
+        let selector = NSSelectorFromString("application:openURL:options:")
+        originalOpenURLIMP = class_getMethodImplementation(cls, selector)
+
+        typealias OpenBlock = @convention(block) (
+            AnyObject,
+            UIApplication,
+            NSURL,
+            NSDictionary
+        ) -> Bool
+
+        let block: OpenBlock = { [weak self] object, application, nsURL, options in
+            let url = nsURL as URL
+            if url.scheme?.lowercased() == "openless",
+               url.host?.lowercased() == "keyboard" {
+                Task { @MainActor [weak self] in
+                    self?.handleKeyboardURL(url)
+                }
+                return true
+            }
+
+            if let original = self?.originalOpenURLIMP {
+                typealias Original = @convention(c) (
+                    AnyObject,
+                    Selector,
+                    UIApplication,
+                    NSURL,
+                    NSDictionary
+                ) -> Bool
+                let function = unsafeBitCast(original, to: Original.self)
+                return function(object, selector, application, nsURL, options)
+            }
+            return false
+        }
+
+        let implementation = imp_implementationWithBlock(block)
+        if let method = class_getInstanceMethod(cls, selector) {
+            method_setImplementation(method, implementation)
+        } else {
+            class_addMethod(cls, selector, implementation, "B@:@@@")
+        }
+        urlHookInstalled = true
+    }
+
+    private func handleKeyboardURL(_ url: URL) {
+        guard let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
+              components.queryItems?.first(where: { $0.name == "action" })?.value == "start",
+              let requestID = components.queryItems?.first(where: { $0.name == "requestID" })?.value,
+              !requestID.isEmpty else {
+            return
+        }
+
+        let mode = components.queryItems?
+            .first(where: { $0.name == "mode" })?
+            .value ?? "smart"
+
+        Task {
+            await sendKeyboardStartCommand(
+                requestID: requestID,
+                mode: mode
+            )
+        }
+    }
+
+    private func sendKeyboardStartCommand(
+        requestID: String,
+        mode: String
+    ) async {
+        guard let url = URL(string: "http://127.0.0.1:14557/command") else { return }
+
+        let payload: [String: Any] = [
+            "action": "startRecording",
+            "requestID": requestID,
+            "mode": mode
+        ]
+        guard let body = try? JSONSerialization.data(withJSONObject: payload) else { return }
+
+        for _ in 0..<24 {
+            var request = URLRequest(url: url)
+            request.httpMethod = "POST"
+            request.httpBody = body
+            request.timeoutInterval = 1
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            request.setValue("7", forHTTPHeaderField: "X-VoiceKing-Protocol")
+
+            do {
+                let (_, response) = try await URLSession.shared.data(for: request)
+                if (response as? HTTPURLResponse)?.statusCode == 200 {
+                    return
+                }
+            } catch {
+                // The Rust listener may still be resuming after app wake.
+            }
+
+            try? await Task.sleep(for: .milliseconds(120))
         }
     }
 

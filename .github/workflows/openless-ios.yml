@@ -466,6 +466,14 @@ jobs:
           q.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n")
           PY
 
+      - name: Wire real GPT ASR validation
+        working-directory: upstream/openless-all/app
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 "$GITHUB_WORKSPACE/adapter/openless-ios/scripts/wire_gpt_asr_validation.py"
+          grep -q "validate_oauth_provider" src-tauri/src/commands/providers.rs
+
       - name: Wire GPT login into OpenLess AI service UI
         working-directory: upstream/openless-all/app
         shell: bash

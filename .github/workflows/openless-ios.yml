@@ -381,6 +381,7 @@ jobs:
 
           cp "$SRC_DIR/KeyboardViewController.swift" "$EXT_DIR/KeyboardViewController.swift"
           cp "$SRC_DIR/Info.plist" "$EXT_DIR/Info.plist"
+          cp "$GITHUB_WORKSPACE/voiceking-ref/Shared/SharedBridge.swift" "$EXT_DIR/SharedBridge.swift"
 
           # Reuse OpenLess' own keyboard assets/dictionaries instead of VoiceKey assets.
           cp "$GITHUB_WORKSPACE/upstream/openless-all/app/android/assets/openless_wordmark.png" "$EXT_DIR/openless_wordmark.png"
@@ -408,6 +409,7 @@ jobs:
           refs = {}
           %w[
             KeyboardViewController.swift
+            SharedBridge.swift
             Info.plist
             openless_wordmark.png
             stroke.dict.tsv
@@ -420,7 +422,8 @@ jobs:
           end
 
           source_refs = [
-            refs['KeyboardViewController.swift']
+            refs['KeyboardViewController.swift'],
+            refs['SharedBridge.swift']
           ]
           existing_sources = ext_target.source_build_phase.files_references
           source_refs.each do |source_ref|

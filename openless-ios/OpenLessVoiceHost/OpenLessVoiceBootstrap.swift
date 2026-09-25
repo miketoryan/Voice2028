@@ -116,8 +116,21 @@ final class OpenLessVoiceBootstrap: NSObject {
     }
 
     private func codexDirectory() throws -> URL {
-        let home = URL(fileURLWithPath: NSHomeDirectory(), isDirectory: true)
-        let directory = home.appendingPathComponent(".codex", isDirectory: true)
+        guard let documents = FileManager.default.urls(
+            for: .documentDirectory,
+            in: .userDomainMask
+        ).first else {
+            throw NSError(
+                domain: "OpenLessGPT",
+                code: 2,
+                userInfo: [NSLocalizedDescriptionKey: "无法定位 OpenLess 文档目录。"]
+            )
+        }
+
+        let directory = documents.appendingPathComponent(
+            "OpenLessGPT",
+            isDirectory: true
+        )
         try FileManager.default.createDirectory(
             at: directory,
             withIntermediateDirectories: true

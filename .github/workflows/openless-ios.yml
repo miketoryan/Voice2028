@@ -1,0 +1,116 @@
+name: Build OpenLess iOS unsigned IPA
+
+on:
+  push:
+    branches:
+      - openless-ios
+    paths:
+      - ".github/workflows/openless-ios.yml"
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout OpenLess beta
+        uses: actions/checkout@v4
+        with:
+          repository: Open-Less/openless
+          ref: beta
+          path: upstream
+          submodules: recursive
+          fetch-depth: 1
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: upstream/openless-all/app/package-lock.json
+
+      - name: Setup Rust iOS targets
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-ios,aarch64-apple-ios-sim,x86_64-apple-ios
+
+      - name: Prepare iOS-only Tauri config
+        working-directory: upstream/openless-all/app
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          p = Path("src-tauri/tauri.conf.json")
+          data = json.loads(p.read_text())
+
+          # Keep OpenLess core/UI intact; only remove desktop-only build assumptions
+          # from this ephemeral iOS build.
+          data["version"] = "2.0.0"
+          data["identifier"] = "com.miketoryan.openlessios"
+          data.setdefault("build", {})["beforeBuildCommand"] = "npm run build"
+
+          # iOS uses one normal main window; the desktop floating capsule is not
+          # a separate iOS window.
+          windows = data.setdefault("app", {}).get("windows", [])
+          if windows:
+              main = dict(windows[0])
+              main["visible"] = True
+              main["transparent"] = False
+              main["decorations"] = True
+              data["app"]["windows"] = [main]
+
+          bundle = data.setdefault("bundle", {})
+          bundle["iOS"] = {
+              "minimumSystemVersion": "16.0",
+              "bundleVersion": "20260925",
+              "infoPlist": "Info.plist"
+          }
+
+          p.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n")
+          PY
+
+      - name: Install frontend dependencies
+        working-directory: upstream/openless-all/app
+        run: npm ci
+
+      - name: Ensure Tauri CLI supports unsigned iOS builds
+        working-directory: upstream/openless-all/app
+        run: npm install --no-save @tauri-apps/cli@2.11.0
+
+      - name: Initialize iOS Xcode project
+        working-directory: upstream/openless-all/app
+        env:
+          CI: "true"
+        run: npx tauri ios init --ci
+
+      - name: Build unsigned iOS IPA
+        working-directory: upstream/openless-all/app
+        env:
+          CI: "true"
+        run: npx tauri ios build --no-sign --ci
+
+      - name: Collect IPA and archive
+        if: always()
+        shell: bash
+        run: |
+          mkdir -p artifact
+          find upstream/openless-all/app/src-tauri/gen/apple/build -type f \( -name "*.ipa" -o -name "*.xcarchive" \) -maxdepth 5 -print 2>/dev/null || true
+          IPA="$(find upstream/openless-all/app/src-tauri/gen/apple/build -type f -name "*.ipa" -print -quit 2>/dev/null || true)"
+          if [ -n "$IPA" ]; then
+            cp "$IPA" artifact/OpenLess-iOS-unsigned.ipa
+          fi
+          if [ -d upstream/openless-all/app/src-tauri/gen/apple/build ]; then
+            tar -czf artifact/openless-ios-build-tree.tgz -C upstream/openless-all/app/src-tauri/gen/apple build || true
+          fi
+
+      - name: Upload build artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: OpenLess-iOS-unsigned
+          path: artifact/
+          if-no-files-found: warn
+          retention-days: 14

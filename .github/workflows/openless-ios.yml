@@ -49,7 +49,7 @@ jobs:
           # Keep OpenLess core/UI intact; only remove desktop-only build assumptions
           # from this ephemeral iOS build.
           data["version"] = "2.0.0"
-          data["identifier"] = "com.miketoryan.openlessios"
+          data["identifier"] = "com.miketoryan.VoiceKey"
           data.setdefault("build", {})["beforeBuildCommand"] = "npm run build"
 
           # iOS uses one normal main window; the desktop floating capsule is not
@@ -64,12 +64,27 @@ jobs:
 
           bundle = data.setdefault("bundle", {})
           bundle["iOS"] = {
-              "minimumSystemVersion": "16.0",
+              "minimumSystemVersion": "17.0",
               "bundleVersion": "20260925",
               "infoPlist": "Info.plist"
           }
 
           p.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n")
+
+          # Reuse the already-registered VoiceKey host settings so AltServer
+          # does not consume another App ID.
+          import plistlib
+          info = Path("src-tauri/Info.plist")
+          with info.open("rb") as fh:
+              plist = plistlib.load(fh)
+          plist["NSMicrophoneUsageDescription"] = "OpenLess needs microphone access for voice dictation."
+          plist["UIBackgroundModes"] = ["audio"]
+          plist["CFBundleURLTypes"] = [{
+              "CFBundleURLName": "VoiceKey OAuth",
+              "CFBundleURLSchemes": ["voicekey"]
+          }]
+          with info.open("wb") as fh:
+              plistlib.dump(plist, fh, sort_keys=False)
           PY
 
       - name: Add minimal iOS text insertion bridge
@@ -116,7 +131,7 @@ jobs:
           find upstream/openless-all/app/src-tauri/gen/apple/build -type f \( -name "*.ipa" -o -name "*.xcarchive" \) -maxdepth 5 -print 2>/dev/null || true
           IPA="$(find upstream/openless-all/app/src-tauri/gen/apple/build -type f -name "*.ipa" -print -quit 2>/dev/null || true)"
           if [ -n "$IPA" ]; then
-            cp "$IPA" artifact/OpenLess-iOS-unsigned.ipa
+            cp "$IPA" artifact/OpenLess-iOS-VoiceKey-AppID.ipa
           fi
           if [ -d upstream/openless-all/app/src-tauri/gen/apple/build ]; then
             tar -czf artifact/openless-ios-build-tree.tgz -C upstream/openless-all/app/src-tauri/gen/apple build || true
@@ -126,7 +141,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: OpenLess-iOS-unsigned
+          name: OpenLess-iOS-VoiceKey-AppID
           path: artifact/
           if-no-files-found: warn
           retention-days: 14

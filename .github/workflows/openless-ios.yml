@@ -191,6 +191,30 @@ jobs:
               '    private var authSession: ASWebAuthenticationSession?\n    weak var presentationWindow: UIWindow?\n',
               1,
           )
+          # Do not inherit the old VoiceKing/OpenLess ChatGPT Keychain record.
+          # This build intentionally requires one fresh manual login, and the
+          # new OAuth token is requested with the same scopes used by current
+          # official Codex login so GPT text processing can use /codex/responses.
+          text = text.replace(
+              'static let scopes = "openid profile email offline_access"',
+              'static let scopes = "openid profile email offline_access api.connectors.read api.connectors.invoke"',
+              1,
+          )
+          text = text.replace(
+              'static let keychainAccount = "voiceking.chatgpt.oauth"',
+              'static let keychainAccount = "openless.chatgpt.oauth.20260926"',
+              1,
+          )
+          text = text.replace(
+              'URLQueryItem(name: "id_token_add_organizations", value: "true")',
+              'URLQueryItem(name: "id_token_add_organizations", value: "true"),\n            URLQueryItem(name: "originator", value: "codex_cli_rs")',
+              1,
+          )
+          text = text.replace(
+              '(claims?["chatgpt_account_id"] as? String) ?? (authClaims?["chatgpt_account_id"] as? String)',
+              '(claims?["https://api.openai.com/auth.chatgpt_account_id"] as? String) ?? (claims?["chatgpt_account_id"] as? String) ?? (authClaims?["chatgpt_account_id"] as? String)',
+              1,
+          )
           text = text.replace(
               '            self.authSession = session\n            session.start()\n',
               '            self.authSession = session\n            if !session.start() {\n                self.authSession = nil\n                continuation.resume(throwing: AuthError.sessionStartFailed)\n            }\n',
@@ -524,6 +548,10 @@ jobs:
           grep -q "document_dir()" src-tauri/src/chatgpt_bridge.rs
           grep -q "OPENLESS_CODEX_AUTH_PATH" src-tauri/src/mobile_runtime.rs
           grep -q "OpenLessGPT" src-tauri/gen/apple/OpenLessVoiceHost/OpenLessVoiceBootstrap.swift
+          grep -q "openless.chatgpt.oauth.20260926" src-tauri/gen/apple/OpenLessVoiceHost/ChatGPTAuthManager.swift
+          grep -q "api.connectors.read api.connectors.invoke" src-tauri/gen/apple/OpenLessVoiceHost/ChatGPTAuthManager.swift
+          grep -q "originator.*codex_cli_rs" src-tauri/gen/apple/OpenLessVoiceHost/ChatGPTAuthManager.swift
+          ! grep -q 'keychainAccount = "voiceking.chatgpt.oauth"' src-tauri/gen/apple/OpenLessVoiceHost/ChatGPTAuthManager.swift
 
       - name: Wire OpenLess Core to iOS keyboard localhost bridge
         working-directory: upstream/openless-all/app

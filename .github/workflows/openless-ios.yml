@@ -160,6 +160,16 @@ jobs:
           cp "$GITHUB_WORKSPACE/voiceking-ref/VoiceKey/Services/LocalBridgeServer.swift" "$HOST_DIR/LocalBridgeServer.swift"
           cp "$GITHUB_WORKSPACE/voiceking-ref/VoiceKey/Services/OAuthCallbackServer.swift" "$HOST_DIR/OAuthCallbackServer.swift"
 
+          # VoiceKing's latest source uses the newer SDK spelling. Xcode 16.4 /
+          # iOS 18.5 exposes the same Bluetooth HFP route as .allowBluetooth.
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path("src-tauri/gen/apple/OpenLessVoiceHost/AudioService.swift")
+          text = p.read_text()
+          text = text.replace(".allowBluetoothHFP", ".allowBluetooth")
+          p.write_text(text)
+          PY
+
           gem install xcodeproj --no-document
 
           ruby <<'RUBY'

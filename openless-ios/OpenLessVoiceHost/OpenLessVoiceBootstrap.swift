@@ -66,9 +66,9 @@ final class OpenLessVoiceBootstrap: NSObject {
             // Silent playback keeps the host process eligible for the existing
             // "audio" background mode while mixing with any user audio.
             try session.setCategory(
-                .playback,
+                .playAndRecord,
                 mode: .default,
-                options: [.mixWithOthers]
+                options: [.mixWithOthers, .defaultToSpeaker, .allowBluetoothHFP]
             )
             try session.setActive(true)
 

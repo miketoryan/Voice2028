@@ -478,6 +478,16 @@ jobs:
           grep -q "OPENLESS_CODEX_AUTH_PATH" src-tauri/src/mobile_runtime.rs
           grep -q "OpenLessGPT" src-tauri/gen/apple/OpenLessVoiceHost/OpenLessVoiceBootstrap.swift
 
+      - name: Wire OpenLess Core to iOS keyboard localhost bridge
+        working-directory: upstream/openless-all/app
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp "$GITHUB_WORKSPACE/adapter/openless-ios/OpenLessProviders/IOSKeyboardBridge.rs"              "src-tauri/src/ios_keyboard_bridge.rs"
+          python3 "$GITHUB_WORKSPACE/adapter/openless-ios/scripts/wire_ios_keyboard_bridge.py"
+          grep -q "127.0.0.1" src-tauri/src/ios_keyboard_bridge.rs
+          grep -q "ios_keyboard_bridge::start" src-tauri/src/mobile_runtime.rs
+
       - name: Add OpenLess original-style iOS keyboard extension
         working-directory: upstream/openless-all/app
         shell: bash

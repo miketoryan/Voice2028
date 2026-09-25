@@ -72,6 +72,22 @@ jobs:
           p.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n")
           PY
 
+      - name: Add minimal iOS text insertion bridge
+        working-directory: upstream/openless-all/app
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          p = Path("src-tauri/src/insertion.rs")
+          text = p.read_text()
+          needle = '''    /// 只写剪贴板、不模拟粘贴。用于目标控件活跃状态无法验证时的兜底路径。\n    pub fn copy_fallback(&self, text: &str) -> InsertStatus {'''
+          bridge = '''    /// iOS host: there is no desktop-style global paste target.\n    /// Keep the shared dictation pipeline compilable; a Keyboard Extension / App Group\n    /// adapter will own final text insertion on iPhone.\n    #[cfg(target_os = "ios")]\n    pub fn insert(\n        &self,\n        text: &str,\n        _restore_clipboard_after_paste: bool,\n        _paste_shortcut: PasteShortcut,\n    ) -> InsertStatus {\n        if text.is_empty() {\n            return InsertStatus::CopiedFallback;\n        }\n        InsertStatus::CopiedFallback\n    }\n\n    /// 只写剪贴板、不模拟粘贴。用于目标控件活跃状态无法验证时的兜底路径。\n    pub fn copy_fallback(&self, text: &str) -> InsertStatus {'''
+          if needle not in text:
+              raise SystemExit("iOS insertion patch anchor not found")
+          p.write_text(text.replace(needle, bridge, 1))
+          PY
+
       - name: Install frontend dependencies
         working-directory: upstream/openless-all/app
         run: npm ci

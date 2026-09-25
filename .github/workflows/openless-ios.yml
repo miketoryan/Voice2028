@@ -135,7 +135,7 @@ jobs:
           CI: "true"
         run: npx tauri ios init --ci
 
-      - name: Add OpenLess GPT voice host
+      - name: Add ChatGPT login bridge only
         working-directory: upstream/openless-all/app
         shell: bash
         run: |
@@ -145,30 +145,14 @@ jobs:
           SRC_DIR="$GITHUB_WORKSPACE/adapter/openless-ios/OpenLessVoiceHost"
           HOST_DIR="$GEN_APPLE/OpenLessVoiceHost"
           mkdir -p "$HOST_DIR"
-          cp "$SRC_DIR"/*.swift "$HOST_DIR/"
-          cp "$SRC_DIR"/*.m "$HOST_DIR/"
 
-          # Reuse the already-tested VoiceKing ChatGPT account login,
-          # transcription, smart cleanup, audio lifecycle and localhost bridge.
-          cp "$GITHUB_WORKSPACE/voiceking-ref/Shared/SharedBridge.swift" "$HOST_DIR/SharedBridge.swift"
-          cp "$GITHUB_WORKSPACE/voiceking-ref/VoiceKey/AppModel.swift" "$HOST_DIR/AppModel.swift"
-          cp "$GITHUB_WORKSPACE/voiceking-ref/VoiceKey/Services/AudioService.swift" "$HOST_DIR/AudioService.swift"
+          # Keep only login + credential synchronization. Recording/transcription
+          # remains owned by OpenLess' native pipeline.
+          cp "$SRC_DIR/OpenLessVoiceBootstrap.swift" "$HOST_DIR/OpenLessVoiceBootstrap.swift"
+          cp "$SRC_DIR/OpenLessVoiceBootstrap.m" "$HOST_DIR/OpenLessVoiceBootstrap.m"
           cp "$GITHUB_WORKSPACE/voiceking-ref/VoiceKey/Services/ChatGPTAuthManager.swift" "$HOST_DIR/ChatGPTAuthManager.swift"
-          cp "$GITHUB_WORKSPACE/voiceking-ref/VoiceKey/Services/ChatGPTTranscriptionService.swift" "$HOST_DIR/ChatGPTTranscriptionService.swift"
-          cp "$GITHUB_WORKSPACE/voiceking-ref/VoiceKey/Services/ChatGPTCleanupService.swift" "$HOST_DIR/ChatGPTCleanupService.swift"
           cp "$GITHUB_WORKSPACE/voiceking-ref/VoiceKey/Services/KeychainStore.swift" "$HOST_DIR/KeychainStore.swift"
-          cp "$GITHUB_WORKSPACE/voiceking-ref/VoiceKey/Services/LocalBridgeServer.swift" "$HOST_DIR/LocalBridgeServer.swift"
           cp "$GITHUB_WORKSPACE/voiceking-ref/VoiceKey/Services/OAuthCallbackServer.swift" "$HOST_DIR/OAuthCallbackServer.swift"
-
-          # VoiceKing's latest source uses the newer SDK spelling. Xcode 16.4 /
-          # iOS 18.5 exposes the same Bluetooth HFP route as .allowBluetooth.
-          python3 - <<'PY'
-          from pathlib import Path
-          p = Path("src-tauri/gen/apple/OpenLessVoiceHost/AudioService.swift")
-          text = p.read_text()
-          text = text.replace(".allowBluetoothHFP", ".allowBluetooth")
-          p.write_text(text)
-          PY
 
           gem install xcodeproj --no-document
 
@@ -205,6 +189,183 @@ jobs:
           project.save
           RUBY
 
+      - name: Add GPT providers to OpenLess AI service
+        working-directory: upstream/openless-all/app
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cp "$GITHUB_WORKSPACE/adapter/openless-ios/OpenLessProviders/ChatGPTAsrProvider.rs"              "src-tauri/src/chatgpt_asr.rs"
+
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          # 1) Register the iOS-only ASR module.
+          p = Path("src-tauri/src/lib.rs")
+          text = p.read_text()
+          anchor = "mod core_adapters;\n"
+          addition = 'mod core_adapters;\n#[cfg(target_os = "ios")]\nmod chatgpt_asr;\n'
+          if addition not in text:
+              if anchor not in text:
+                  raise SystemExit("lib.rs core_adapters anchor missing")
+              text = text.replace(anchor, addition, 1)
+          p.write_text(text)
+
+          # 2) Register GPT ASR in OpenLess' existing TranscriptionRouter.
+          p = Path("src-tauri/src/core_adapters.rs")
+          text = p.read_text()
+          anchor = '''    for provider_type in openless_core::SHARED_CLOUD_ASR_PROVIDER_TYPES {
+              transcription
+                  .register(*provider_type, Arc::clone(&production_asr))
+                  .expect("built-in ASR provider ids are non-empty");
+          }
+          '''
+          addition = anchor + '''    #[cfg(target_os = "ios")]
+          {
+              let chatgpt_asr: Arc<dyn TranscriptionEngine> =
+                  Arc::new(crate::chatgpt_asr::ChatGptOAuthTranscriptionEngine::new());
+              transcription
+                  .register(crate::chatgpt_asr::PROVIDER_ID, chatgpt_asr)
+                  .expect("ChatGPT OAuth ASR provider id is non-empty");
+          }
+          '''
+          if 'ChatGptOAuthTranscriptionEngine::new()' not in text:
+              if anchor not in text:
+                  raise SystemExit("core_adapters ASR registration anchor missing")
+              text = text.replace(anchor, addition, 1)
+          p.write_text(text)
+
+          # 3) Add GPT ASR to Core provider descriptors and relabel Codex OAuth
+          # as the user-facing GPT smart-cleanup LLM channel.
+          p = Path("crates/openless-core/src/provider_rules.rs")
+          text = p.read_text()
+          text = text.replace(
+              'const ASR_PROVIDER_TYPES: &[(&str, &str)] = &[\n',
+              'const ASR_PROVIDER_TYPES: &[(&str, &str)] = &[\n    ("chatgpt_oauth", "asrChatGPT"),\n',
+              1,
+          )
+          text = text.replace(
+              '(crate::polish::CODEX_OAUTH_PROVIDER_ID, "codexOAuth"),',
+              '(crate::polish::CODEX_OAUTH_PROVIDER_ID, "gptSmartCleanup"),',
+              1,
+          )
+          text = text.replace(
+              '                "volcengine" => AuthRequirement::Volcengine,\n',
+              '                "chatgpt_oauth" => AuthRequirement::OAuth,\n                "volcengine" => AuthRequirement::Volcengine,\n',
+              1,
+          )
+          text = text.replace(
+              '                "volcengine" | XFYUN_PROVIDER_ID | TENCENT_CLOUD_PROVIDER_ID => {\n',
+              '                "chatgpt_oauth" => ValidationProbe::Unsupported,\n                "volcengine" | XFYUN_PROVIDER_ID | TENCENT_CLOUD_PROVIDER_ID => {\n',
+              1,
+          )
+          text = text.replace(
+              '        "elevenlabs" => Some(crate::asr::elevenlabs::DEFAULT_MODEL),\n',
+              '        "chatgpt_oauth" => Some("chatgpt-transcribe"),\n        "elevenlabs" => Some(crate::asr::elevenlabs::DEFAULT_MODEL),\n',
+              1,
+          )
+          p.write_text(text)
+
+          # 4) Mark the GPT ASR channel configured from the same Codex/ChatGPT OAuth file.
+          p = Path("src-tauri/src/commands/credentials.rs")
+          text = p.read_text()
+          old = '''    openless_core::provider_rules::asr_configured(
+              provider,
+              &credential_configuration(snap, "", false),
+              local_asr_configured(provider, model_store),
+          )
+          '''
+          new = '''    let chatgpt_oauth =
+              provider == "chatgpt_oauth" && CodexOAuthCredentials::load_default().is_ok();
+          openless_core::provider_rules::asr_configured(
+              provider,
+              &credential_configuration(snap, "", chatgpt_oauth),
+              local_asr_configured(provider, model_store),
+          )
+          '''
+          if old not in text:
+              raise SystemExit("credentials ASR configured anchor missing")
+          text = text.replace(old, new, 1)
+          p.write_text(text)
+
+          # 5) Keep OpenLess' channel UI. OAuth channels simply show the shared-login notice;
+          # no API key / endpoint fields are introduced.
+          p = Path("src/pages/settings/ProvidersSection.tsx")
+          text = p.read_text()
+          text = text.replace(
+              "  ['codex_oauth', 'codexOAuth'],",
+              "  ['codex_oauth', 'gptSmartCleanup'],",
+              1,
+          )
+          oauth_anchor = """  // 本地引擎（qwen3 / sherpa / foundry / Apple 语音）没有 key 与地址；模型的下载与
+          // 切换仍由「高级 → 本地模型」里的 <LocalAsr embedded /> 负责，这里只说明一句。
+          """
+          oauth_block = """  if (descriptor?.authRequirement === 'o_auth') {
+            return (
+              <div style={{ fontSize: 11.5, color: 'var(--ol-ink-4)', lineHeight: 1.6 }}>
+                {t('settings.providers.chatgptOAuthNotice')}
+              </div>
+            );
+          }
+
+          """ + oauth_anchor
+          if "settings.providers.chatgptOAuthNotice" not in text:
+              if oauth_anchor not in text:
+                  raise SystemExit("ProvidersSection OAuth anchor missing")
+              text = text.replace(oauth_anchor, oauth_block, 1)
+          p.write_text(text)
+
+          # 6) Localized labels only; do not alter the rest of Settings UI.
+          replacements = {
+              "src/i18n/zh-CN.ts": [
+                  ("codexOAuth: 'Codex OAuth',", "gptSmartCleanup: 'GPT 智能整理',"),
+                  ("asrVolcengine: '火山引擎 bigasr',", "asrChatGPT: 'GPT 语音识别',\n        asrVolcengine: '火山引擎 bigasr',"),
+                  ("codexOAuthNotice:\n        'Codex OAuth 使用本机 Codex 登录状态（~/.codex/auth.json），无需在 OpenLess 中保存 API Key 或 Base URL。',",
+                   "codexOAuthNotice:\n        'GPT 智能整理使用当前 ChatGPT 登录状态，无需 API Key。',\n      chatgptOAuthNotice:\n        '使用当前 ChatGPT 登录状态，无需填写 API Key 或服务地址。',"),
+              ],
+              "src/i18n/en.ts": [
+                  ("codexOAuth: 'Codex OAuth',", "gptSmartCleanup: 'GPT Smart Cleanup',"),
+                  ("asrVolcengine: 'Volcengine bigasr',", "asrChatGPT: 'GPT Speech Recognition',\n        asrVolcengine: 'Volcengine bigasr',"),
+              ],
+          }
+          for filename, pairs in replacements.items():
+              q = Path(filename)
+              body = q.read_text()
+              for old, new in pairs:
+                  if old in body:
+                      body = body.replace(old, new, 1)
+              if filename.endswith("/en.ts") and "chatgptOAuthNotice:" not in body:
+                  marker = "codexOAuthNotice:"
+                  idx = body.find(marker)
+                  if idx >= 0:
+                      line_end = body.find("\n", idx)
+                      next_end = body.find("\n", line_end + 1)
+                      body = body[:next_end+1] + "      chatgptOAuthNotice: 'Uses your current ChatGPT sign-in. No API key or service URL is required.',\n" + body[next_end+1:]
+              q.write_text(body)
+
+          # 7) Keep the generated frontend descriptor snapshot consistent with Core.
+          q = Path("src/lib/ipc/provider-descriptors.generated.json")
+          data = json.loads(q.read_text())
+          if not any(item.get("providerType") == "chatgpt_oauth" for item in data["asr"]):
+              data["asr"].insert(0, {
+                  "authRequirement": "o_auth",
+                  "defaultEndpoint": None,
+                  "defaultModel": "chatgpt-transcribe",
+                  "defaultRequestFormat": None,
+                  "kind": "asr",
+                  "labelKey": "asrChatGPT",
+                  "providerType": "chatgpt_oauth",
+                  "staticModels": [],
+                  "supportedRequestFormats": [],
+                  "validationProbe": "unsupported",
+              })
+          for item in data["llm"]:
+              if item.get("providerType") == "codex_oauth":
+                  item["labelKey"] = "gptSmartCleanup"
+          q.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n")
+          PY
+
       - name: Add OpenLess original-style iOS keyboard extension
         working-directory: upstream/openless-all/app
         shell: bash
@@ -218,7 +379,6 @@ jobs:
 
           cp "$SRC_DIR/KeyboardViewController.swift" "$EXT_DIR/KeyboardViewController.swift"
           cp "$SRC_DIR/Info.plist" "$EXT_DIR/Info.plist"
-          cp "$GITHUB_WORKSPACE/voiceking-ref/Shared/SharedBridge.swift" "$EXT_DIR/SharedBridge.swift"
 
           # Reuse OpenLess' own keyboard assets/dictionaries instead of VoiceKey assets.
           cp "$GITHUB_WORKSPACE/upstream/openless-all/app/android/assets/openless_wordmark.png" "$EXT_DIR/openless_wordmark.png"
@@ -246,7 +406,6 @@ jobs:
           refs = {}
           %w[
             KeyboardViewController.swift
-            SharedBridge.swift
             Info.plist
             openless_wordmark.png
             stroke.dict.tsv
@@ -259,8 +418,7 @@ jobs:
           end
 
           source_refs = [
-            refs['KeyboardViewController.swift'],
-            refs['SharedBridge.swift']
+            refs['KeyboardViewController.swift']
           ]
           existing_sources = ext_target.source_build_phase.files_references
           source_refs.each do |source_ref|
@@ -341,7 +499,7 @@ jobs:
           find upstream/openless-all/app/src-tauri/gen/apple/build -type f \( -name "*.ipa" -o -name "*.xcarchive" \) -maxdepth 5 -print 2>/dev/null || true
           IPA="$(find upstream/openless-all/app/src-tauri/gen/apple/build -type f -name "*.ipa" -print -quit 2>/dev/null || true)"
           if [ -n "$IPA" ]; then
-            cp "$IPA" artifact/OpenLess-iOS-GPT-Smart-Verbatim.ipa
+            cp "$IPA" artifact/OpenLess-iOS-GPT-Providers.ipa
 
             VERIFY_DIR="$RUNNER_TEMP/openless-verify"
             rm -rf "$VERIFY_DIR"
@@ -375,7 +533,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: OpenLess-iOS-GPT-Smart-Verbatim
+          name: OpenLess-iOS-GPT-Providers
           path: artifact/
           if-no-files-found: warn
           retention-days: 14

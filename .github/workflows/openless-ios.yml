@@ -109,6 +109,26 @@ jobs:
               plistlib.dump(plist, fh, sort_keys=False)
           PY
 
+      - name: Disable OpenLess splash video on iOS
+        working-directory: upstream/openless-all/app
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          p = Path("src/main.tsx")
+          text = p.read_text()
+          text = text.replace("import { SplashVideo } from './components/SplashVideo';\n", "")
+          text = text.replace("      {isMainWindow && <SplashVideo />}\n", "")
+          p.write_text(text)
+
+          # The video is no longer referenced on iOS; remove it from this build
+          # to shorten startup work and reduce IPA size.
+          splash = Path("public/openless-2.0-splash.mp4")
+          if splash.exists():
+              splash.unlink()
+          PY
+
       - name: Add minimal iOS text insertion bridge
         working-directory: upstream/openless-all/app
         shell: bash

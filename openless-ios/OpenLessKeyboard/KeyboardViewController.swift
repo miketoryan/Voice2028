@@ -1,3 +1,4 @@
+import Foundation
 import UIKit
 
 private enum InputMode: Int, CaseIterable {
@@ -176,6 +177,17 @@ final class KeyboardViewController: UIInputViewController {
     private var strokeCandidates: [String] = []
     private var clipboardHistory: [String] = []
     private var voiceState = "idle"
+    private let voiceBridge = LocalBridgeClient()
+    private var bridgeState = BridgeState.unavailable()
+    private var currentVoiceRequestID: String?
+    private var heartbeatTask: Task<Void, Never>?
+    private var pollingTask: Task<Void, Never>?
+    private var commandTask: Task<Void, Never>?
+    private var lastInsertedRequestID: String?
+
+    private enum VoiceDefaults {
+        static let transcriptionMode = "openless.gpt.transcription-mode"
+    }
 
     private let panelHeight: CGFloat = 300
     private let sideInset: CGFloat = 12
@@ -197,6 +209,18 @@ final class KeyboardViewController: UIInputViewController {
     override func viewWillAppear(_ animated: Bool) {
         super.viewWillAppear(animated)
         refreshClipboardHistory()
+        startVoiceBridgeTasks()
+    }
+
+    override func viewWillDisappear(_ animated: Bool) {
+        stopVoiceBridgeTasks()
+        super.viewWillDisappear(animated)
+    }
+
+    deinit {
+        heartbeatTask?.cancel()
+        pollingTask?.cancel()
+        commandTask?.cancel()
     }
 
     private var isDark: Bool {
@@ -360,31 +384,49 @@ final class KeyboardViewController: UIInputViewController {
     }
 
     private func buildVoice(into root: UIStackView) {
+        let transcriptionMode = UISegmentedControl(items: ["智能整理", "原文"])
+        transcriptionMode.selectedSegmentIndex = selectedTranscriptionMode == .smart ? 0 : 1
+        transcriptionMode.addTarget(self, action: #selector(transcriptionModeChanged(_:)), for: .valueChanged)
+        transcriptionMode.heightAnchor.constraint(equalToConstant: 32).isActive = true
+        root.addArrangedSubview(transcriptionMode)
+
         let status = UILabel()
         status.textAlignment = .center
         status.textColor = secondaryTextColor
-        status.font = .systemFont(ofSize: 16)
-        status.heightAnchor.constraint(equalToConstant: 38).isActive = true
+        status.font = .systemFont(ofSize: 14)
+        status.heightAnchor.constraint(equalToConstant: 28).isActive = true
         status.text = voiceStatusText
         root.addArrangedSubview(status)
 
         let holder = UIView()
         let mic = ActionButton(type: .system)
         mic.translatesAutoresizingMaskIntoConstraints = false
-        mic.layer.cornerRadius = 36
+        mic.layer.cornerRadius = 31
         mic.backgroundColor = voiceState == "recording" ? .systemRed :
             (isDark ? UIColor(white: 0.23, alpha: 1) : .white)
         mic.setTitleColor(voiceState == "recording" ? .white : textColor, for: .normal)
-        mic.titleLabel?.font = .systemFont(ofSize: 21, weight: .semibold)
-        mic.setTitle(voiceState == "recording" ? "⏹ 结束听写" : "🎙 点击开始说话", for: .normal)
+        mic.titleLabel?.font = .systemFont(ofSize: 18, weight: .semibold)
+
+        let micTitle: String
+        switch voiceState {
+        case "recording":
+            micTitle = "⏹ 结束听写"
+        case "processing":
+            micTitle = selectedTranscriptionMode == .smart ? "GPT 正在整理…" : "GPT 正在识别…"
+        case "opening":
+            micTitle = "正在连接 OpenLess…"
+        default:
+            micTitle = "🎙 点击开始说话"
+        }
+        mic.setTitle(micTitle, for: .normal)
         mic.setAction { [weak self] in self?.toggleVoice() }
         holder.addSubview(mic)
 
         NSLayoutConstraint.activate([
             mic.centerXAnchor.constraint(equalTo: holder.centerXAnchor),
             mic.centerYAnchor.constraint(equalTo: holder.centerYAnchor),
-            mic.widthAnchor.constraint(equalToConstant: 176),
-            mic.heightAnchor.constraint(equalToConstant: 72)
+            mic.widthAnchor.constraint(equalToConstant: 190),
+            mic.heightAnchor.constraint(equalToConstant: 62)
         ])
         root.addArrangedSubview(holder)
 
@@ -392,7 +434,7 @@ final class KeyboardViewController: UIInputViewController {
         footer.axis = .horizontal
         footer.distribution = .equalSpacing
         footer.alignment = .center
-        footer.heightAnchor.constraint(equalToConstant: 78).isActive = true
+        footer.heightAnchor.constraint(equalToConstant: 52).isActive = true
 
         footer.addArrangedSubview(makeKey("@", width: 84) { [weak self] in
             self?.insertText("@")
@@ -406,34 +448,208 @@ final class KeyboardViewController: UIInputViewController {
         root.addArrangedSubview(footer)
     }
 
+    @objc private func transcriptionModeChanged(_ sender: UISegmentedControl) {
+        let mode: TranscriptionMode = sender.selectedSegmentIndex == 1 ? .verbatim : .smart
+        UserDefaults.standard.set(mode.rawValue, forKey: VoiceDefaults.transcriptionMode)
+        if inputMode == .voice {
+            rebuild()
+        }
+    }
+
+    private var selectedTranscriptionMode: TranscriptionMode {
+        guard let raw = UserDefaults.standard.string(forKey: VoiceDefaults.transcriptionMode),
+              let mode = TranscriptionMode(rawValue: raw) else {
+            return .smart
+        }
+        return mode
+    }
+
     private var voiceStatusText: String {
+        if let error = bridgeState.lastError, bridgeState.status == .error {
+            return error
+        }
         switch voiceState {
-        case "recording": return "再次点击结束"
-        case "processing": return "正在思考"
-        case "opening": return "正在打开 OpenLess…"
-        default: return "点击开始说话"
+        case "recording":
+            return selectedTranscriptionMode == .smart ? "录音中 · 智能整理" : "录音中 · 原文"
+        case "processing":
+            return selectedTranscriptionMode == .smart ? "GPT 正在识别并智能整理…" : "GPT 正在识别原文…"
+        case "opening":
+            return "正在连接 OpenLess 主程序…"
+        default:
+            return bridgeState.serviceReady ? "GPT 语音识别已就绪" : "请先打开 OpenLess 登录 ChatGPT"
         }
     }
 
     private func toggleVoice() {
         guard hasFullAccess else {
-            voiceState = "idle"
             showTransientStatus("请在设置中允许“完全访问”")
             return
         }
 
-        if voiceState == "recording" {
+        if bridgeState.status == .completed,
+           let requestID = bridgeState.requestID,
+           bridgeState.isFreshResponse(for: requestID),
+           let text = bridgeState.transcribedText,
+           !text.isEmpty {
+            insertVoiceResult(text, requestID: requestID)
+            return
+        }
+
+        if bridgeState.status == .recording {
             voiceState = "processing"
             rebuild()
-            openHost(action: "stop")
-        } else {
+            sendVoiceCommand(.stopRecording, requestID: bridgeState.requestID ?? currentVoiceRequestID)
+            return
+        }
+
+        if bridgeState.status == .starting || bridgeState.status == .transcribing {
+            return
+        }
+
+        guard bridgeState.serviceReady else {
             voiceState = "opening"
             rebuild()
-            openHost(action: "start")
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in
-                self?.voiceState = "recording"
-                self?.rebuild()
+            openHost(action: "login")
+            return
+        }
+
+        let requestID = UUID().uuidString
+        currentVoiceRequestID = requestID
+        lastInsertedRequestID = nil
+        voiceState = "opening"
+        rebuild()
+        sendVoiceCommand(
+            .startRecording,
+            requestID: requestID,
+            mode: selectedTranscriptionMode
+        )
+    }
+
+    private func startVoiceBridgeTasks() {
+        stopVoiceBridgeTasks()
+
+        heartbeatTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            await self.sendVoiceHeartbeat()
+            while !Task.isCancelled {
+                do { try await Task.sleep(for: LocalBridge.keyboardHeartbeatInterval) }
+                catch { return }
+                await self.sendVoiceHeartbeat()
             }
+        }
+
+        pollingTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            await self.fetchVoiceState()
+            while !Task.isCancelled {
+                do { try await Task.sleep(for: .milliseconds(400)) }
+                catch { return }
+                await self.fetchVoiceState()
+            }
+        }
+    }
+
+    private func stopVoiceBridgeTasks() {
+        heartbeatTask?.cancel()
+        heartbeatTask = nil
+        pollingTask?.cancel()
+        pollingTask = nil
+    }
+
+    private func sendVoiceHeartbeat() async {
+        do {
+            applyVoiceState(try await voiceBridge.send(.heartbeat))
+        } catch {
+            applyVoiceConnectionFailure()
+        }
+    }
+
+    private func fetchVoiceState() async {
+        do {
+            applyVoiceState(try await voiceBridge.fetchState())
+        } catch {
+            applyVoiceConnectionFailure()
+        }
+    }
+
+    private func sendVoiceCommand(
+        _ action: BridgeAction,
+        requestID: String?,
+        mode: TranscriptionMode? = nil
+    ) {
+        commandTask?.cancel()
+        commandTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            do {
+                self.applyVoiceState(
+                    try await self.voiceBridge.send(
+                        action,
+                        requestID: requestID,
+                        mode: mode
+                    )
+                )
+            } catch {
+                self.applyVoiceConnectionFailure()
+                if action == .startRecording {
+                    self.voiceState = "opening"
+                    self.rebuild()
+                    self.openHost(action: "wake")
+                }
+            }
+        }
+    }
+
+    private func applyVoiceState(_ state: BridgeState) {
+        let oldStatus = bridgeState.status
+        let oldRevision = bridgeState.revision
+        bridgeState = state
+
+        switch state.status {
+        case .recording:
+            voiceState = "recording"
+        case .starting:
+            voiceState = "opening"
+        case .transcribing:
+            voiceState = "processing"
+        case .completed:
+            voiceState = "idle"
+            if let requestID = state.requestID,
+               requestID != lastInsertedRequestID,
+               state.isFreshResponse(for: requestID),
+               let text = state.transcribedText,
+               !text.isEmpty,
+               currentVoiceRequestID == nil || currentVoiceRequestID == requestID {
+                insertVoiceResult(text, requestID: requestID)
+            }
+        case .error, .idle:
+            voiceState = "idle"
+        }
+
+        if inputMode == .voice,
+           oldStatus != state.status || oldRevision != state.revision {
+            rebuild()
+        }
+    }
+
+    private func applyVoiceConnectionFailure() {
+        bridgeState = .unavailable("OpenLess 主程序未连接")
+        if voiceState != "opening" {
+            voiceState = "idle"
+        }
+        if inputMode == .voice {
+            rebuild()
+        }
+    }
+
+    private func insertVoiceResult(_ text: String, requestID: String) {
+        guard lastInsertedRequestID != requestID else { return }
+        textDocumentProxy.insertText(text)
+        lastInsertedRequestID = requestID
+        currentVoiceRequestID = nil
+        voiceState = "idle"
+
+        Task { [voiceBridge] in
+            _ = try? await voiceBridge.send(.acknowledgeResult, requestID: requestID)
         }
     }
 

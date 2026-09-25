@@ -329,6 +329,31 @@ jobs:
           )
           p.write_text(text)
 
+          # iOS HOME can point outside the writable app sandbox. Make OpenLess'
+          # native Codex OAuth resolver use the actual container root derived from tmp/.
+          p = Path("crates/openless-core/src/polish.rs")
+          text = p.read_text()
+          old_home = """fn default_codex_home_dir() -> Option<PathBuf> {
+              if let Some(home) = non_empty_env_path("HOME") {
+                  return Some(home);
+              }
+          """
+          new_home = """fn default_codex_home_dir() -> Option<PathBuf> {
+              #[cfg(target_os = "ios")]
+              {
+                  if let Some(home) = std::env::temp_dir().parent() {
+                      return Some(home.to_path_buf());
+                  }
+              }
+              if let Some(home) = non_empty_env_path("HOME") {
+                  return Some(home);
+              }
+          """
+          if old_home not in text:
+              raise SystemExit("default_codex_home_dir anchor missing")
+          text = text.replace(old_home, new_home, 1)
+          p.write_text(text)
+
           # 4) Mark the GPT ASR channel configured from the same Codex/ChatGPT OAuth file.
           p = Path("src-tauri/src/commands/credentials.rs")
           text = p.read_text()

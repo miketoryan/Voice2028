@@ -89,7 +89,7 @@ jobs:
           plist["UIBackgroundModes"] = ["audio"]
           plist["CFBundleURLTypes"] = [{
               "CFBundleURLName": "VoiceKey OAuth",
-              "CFBundleURLSchemes": ["voicekey"]
+              "CFBundleURLSchemes": ["voicekey", "openless"]
           }]
           with info.open("wb") as fh:
               plistlib.dump(plist, fh, sort_keys=False)

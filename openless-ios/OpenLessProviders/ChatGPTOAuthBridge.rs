@@ -82,6 +82,17 @@ pub fn chatgpt_oauth_status() -> ChatGptOAuthStatus {
 }
 
 fn codex_directory() -> Option<PathBuf> {
+    #[cfg(target_os = "ios")]
+    {
+        // On iOS the HOME environment variable may resolve to /var/mobile,
+        // which is outside this app's writable sandbox. NSTemporaryDirectory()
+        // and Rust temp_dir() live under <AppContainer>/tmp, so its parent is
+        // the real sandbox home and matches Swift NSHomeDirectory().
+        if let Some(home) = std::env::temp_dir().parent() {
+            return Some(home.join(".codex"));
+        }
+    }
+
     std::env::var_os("HOME")
         .map(PathBuf::from)
         .map(|home| home.join(".codex"))

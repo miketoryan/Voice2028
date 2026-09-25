@@ -120,6 +120,7 @@ jobs:
           text = p.read_text()
           text = text.replace("import { SplashVideo } from './components/SplashVideo';\n", "")
           text = text.replace("      {isMainWindow && <SplashVideo />}\n", "")
+          text = text.replace("const isMainWindow = !windowKind;\n", "")
           p.write_text(text)
 
           # The video is no longer referenced on iOS; remove it from this build

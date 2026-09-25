@@ -66,35 +66,35 @@ private final class StrokeRepository: @unchecked Sendable {
         }
     }
 
-    func search(_ pattern: String, completion: @escaping ([String]) -> Void) {
-        guard !pattern.isEmpty else {
-            completion([])
-            return
-        }
+    func search(_ pattern: String) async -> [String] {
+        guard !pattern.isEmpty else { return [] }
 
-        queue.async { [weak self] in
-            guard let self else { return }
-            self.ensureLoaded()
+        return await withCheckedContinuation { continuation in
+            queue.async { [weak self] in
+                guard let self else {
+                    continuation.resume(returning: [])
+                    return
+                }
+                self.ensureLoaded()
 
-            let prefix = String(pattern.prefix { $0 != "*" }.prefix(4))
-            let source = self.buckets[prefix] ?? []
-            var seen = Set<String>()
-            var result: [String] = []
+                let prefix = String(pattern.prefix { $0 != "*" }.prefix(4))
+                let source = self.buckets[prefix] ?? []
+                var seen = Set<String>()
+                var result: [String] = []
 
-            let sorted = source
-                .filter { self.matches(pattern, $0.code) }
-                .sorted {
-                    (self.frequency[$0.text] ?? 0) > (self.frequency[$1.text] ?? 0)
+                let sorted = source
+                    .filter { self.matches(pattern, $0.code) }
+                    .sorted {
+                        (self.frequency[$0.text] ?? 0) > (self.frequency[$1.text] ?? 0)
+                    }
+
+                for entry in sorted where !seen.contains(entry.text) {
+                    seen.insert(entry.text)
+                    result.append(entry.text)
+                    if result.count >= 36 { break }
                 }
 
-            for entry in sorted where !seen.contains(entry.text) {
-                seen.insert(entry.text)
-                result.append(entry.text)
-                if result.count >= 36 { break }
-            }
-
-            DispatchQueue.main.async {
-                completion(result)
+                continuation.resume(returning: result)
             }
         }
     }
@@ -438,12 +438,8 @@ final class KeyboardViewController: UIInputViewController {
     }
 
     private func openHost(action: String) {
-        guard let primary = URL(string: "openless://keyboard?action=\(action)") else { return }
-        extensionContext?.open(primary) { [weak self] success in
-            guard !success,
-                  let fallback = URL(string: "voicekey://keyboard?action=\(action)") else { return }
-            self?.extensionContext?.open(fallback, completionHandler: nil)
-        }
+        guard let url = URL(string: "openless://keyboard?action=\(action)") else { return }
+        extensionContext?.open(url, completionHandler: nil)
     }
 
     private func buildEnglish(into root: UIStackView) {
@@ -634,7 +630,8 @@ final class KeyboardViewController: UIInputViewController {
         }
 
         let current = strokeCode
-        StrokeRepository.shared.search(current) { [weak self] result in
+        Task { @MainActor [weak self] in
+            let result = await StrokeRepository.shared.search(current)
             guard let self, self.strokeCode == current else { return }
             self.strokeCandidates = result
             self.rebuild()

@@ -8,6 +8,7 @@ final class OpenLessVoiceBootstrap: NSObject {
 
     private let auth = ChatGPTAuthManager()
     private var loginRunning = false
+    private var bridgeTimer: Timer?
 
     @objc func start() {
         NotificationCenter.default.addObserver(
@@ -17,6 +18,8 @@ final class OpenLessVoiceBootstrap: NSObject {
             object: nil
         )
 
+        startBridgePolling()
+
         Task { @MainActor in
             await self.syncCredentialIfPossible()
         }
@@ -25,6 +28,38 @@ final class OpenLessVoiceBootstrap: NSObject {
     @objc private func applicationDidBecomeActive() {
         Task { @MainActor in
             await syncCredentialIfPossible()
+        }
+    }
+
+    private func startBridgePolling() {
+        bridgeTimer?.invalidate()
+
+        let timer = Timer(timeInterval: 0.35, repeats: true) { [weak self] _ in
+            Task { @MainActor in
+                self?.consumeLoginRequestIfPresent()
+            }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        bridgeTimer = timer
+
+        consumeLoginRequestIfPresent()
+    }
+
+    private func consumeLoginRequestIfPresent() {
+        guard !loginRunning else { return }
+
+        do {
+            let requestURL = try codexDirectory()
+                .appendingPathComponent("openless-login-request.json")
+            guard FileManager.default.fileExists(atPath: requestURL.path) else { return }
+
+            try? FileManager.default.removeItem(at: requestURL)
+            beginLoginFromBridge()
+        } catch {
+            writeLoginState(
+                state: "error",
+                message: "无法读取 GPT 登录请求：\(error.localizedDescription)"
+            )
         }
     }
 
@@ -133,9 +168,3 @@ final class OpenLessVoiceBootstrap: NSObject {
     }
 }
 
-@_cdecl("openless_chatgpt_begin_login")
-public func openless_chatgpt_begin_login() {
-    Task { @MainActor in
-        OpenLessVoiceBootstrap.shared.beginLoginFromBridge()
-    }
-}

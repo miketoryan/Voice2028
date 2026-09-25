@@ -1,11 +1,13 @@
 name: Publish OpenLess IPA direct download
 
 on:
-  push:
+  workflow_run:
+    workflows:
+      - Build OpenLess iOS unsigned IPA
     branches:
       - openless-ios
-    paths:
-      - .github/workflows/publish-openless-ipa.yml
+    types:
+      - completed
   workflow_dispatch:
 
 permissions:
@@ -14,15 +16,42 @@ permissions:
 
 jobs:
   publish:
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-latest
     steps:
+      - name: Resolve successful iOS build run
+        id: build
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT_NAME: ${{ github.event_name }}
+          EVENT_RUN_ID: ${{ github.event.workflow_run.id }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT_NAME" = "workflow_run" ]; then
+            RUN_ID="$EVENT_RUN_ID"
+          else
+            RUN_ID="$(gh run list \
+              --repo "$GITHUB_REPOSITORY" \
+              --workflow openless-ios.yml \
+              --branch openless-ios \
+              --status success \
+              --limit 1 \
+              --json databaseId \
+              --jq '.[0].databaseId')"
+          fi
+          test -n "$RUN_ID"
+          echo "run_id=$RUN_ID" >> "$GITHUB_OUTPUT"
+
       - name: Download the verified IPA artifact
         env:
           GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ steps.build.outputs.run_id }}
         run: |
           set -euo pipefail
           mkdir -p release
-          gh run download 36150858910 \
+          gh run download "$RUN_ID" \
             --repo "$GITHUB_REPOSITORY" \
             --name OpenLess-iOS-GPT-Providers \
             --dir release
@@ -40,7 +69,7 @@ jobs:
           else
             gh release create "$TAG" "$IPA" \
               --repo "$GITHUB_REPOSITORY" \
-              --target "$GITHUB_SHA" \
+              --target openless-ios \
               --title "OpenLess iOS GPT ASR" \
               --notes "Unsigned OpenLess iOS IPA with the native GPT ASR channel. Sign and install with AltStore or AltServer." \
               --prerelease

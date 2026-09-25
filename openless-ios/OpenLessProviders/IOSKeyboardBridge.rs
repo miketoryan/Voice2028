@@ -2,15 +2,51 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use openless_core::{
-    DictationStartOptions, DictationStopOptions, OpenLessBackend,
+    DictationStartOptions, DictationStopOptions, OpenLessBackend, ProviderSlot, SessionId,
 };
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
+use std::sync::{OnceLock, Weak};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
 const PORT: u16 = 14_557;
 const PROTOCOL_VERSION: &str = "7";
+
+static NATIVE_AUDIO_BRIDGE: OnceLock<Weak<KeyboardBridge>> = OnceLock::new();
+
+unsafe extern "C" {
+    fn OpenLessNativeAudioStart() -> bool;
+    fn OpenLessNativeAudioStop();
+}
+
+fn start_native_audio() -> bool {
+    // The symbol is supplied by OpenLessVoiceBootstrap.m in the iOS host.
+    unsafe { OpenLessNativeAudioStart() }
+}
+
+fn stop_native_audio() {
+    // The symbol is supplied by OpenLessVoiceBootstrap.m in the iOS host.
+    unsafe { OpenLessNativeAudioStop() }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn openless_ios_audio_pcm(bytes: *const u8, length: usize) {
+    if bytes.is_null() || length == 0 || !length.is_multiple_of(2) {
+        return;
+    }
+    let Some(bridge) = NATIVE_AUDIO_BRIDGE.get().and_then(Weak::upgrade) else {
+        return;
+    };
+    let Some(session_id) = *bridge.session.lock() else {
+        return;
+    };
+    // Swift owns this allocation for the duration of this synchronous call.
+    let pcm = unsafe { std::slice::from_raw_parts(bytes, length) };
+    if let Err(error) = bridge.backend.feed_external_pcm(session_id, pcm) {
+        log::warn!("[ios-keyboard] rejected native PCM: {error}");
+    }
+}
 
 #[derive(Clone, Copy, Debug, Default, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -68,44 +104,61 @@ struct KeyboardBridge {
     backend: Arc<OpenLessBackend>,
     state: Mutex<BridgeState>,
     mode: Mutex<TranscriptionMode>,
+    session: Mutex<Option<SessionId>>,
 }
 
 impl KeyboardBridge {
-    fn chatgpt_login_required(&self) -> bool {
-        self.backend.snapshot().credentials.active_asr_provider == crate::chatgpt_asr::PROVIDER_ID
+    async fn selected_asr_provider_type(&self) -> Result<String, openless_core::BackendError> {
+        let active_id = self.backend.active_provider(ProviderSlot::Asr).await?;
+        Ok(self
+            .backend
+            .list_channels(openless_core::ChannelKind::Asr)
+            .await?
+            .into_iter()
+            .find(|channel| channel.id == active_id)
+            .map(|channel| channel.provider_type)
+            .unwrap_or(active_id))
     }
 
-    fn selected_asr_is_ready(&self) -> bool {
-        !self.chatgpt_login_required()
-            || openless_core::polish::CodexOAuthCredentials::load_default().is_ok()
+    async fn selected_asr_is_ready(&self) -> bool {
+        match self.selected_asr_provider_type().await {
+            Ok(provider) if provider == crate::chatgpt_asr::PROVIDER_ID => {
+                openless_core::polish::CodexOAuthCredentials::load_default().is_ok()
+            }
+            Ok(_) => true,
+            Err(error) => {
+                log::warn!("[ios-keyboard] resolve active ASR failed: {error}");
+                false
+            }
+        }
     }
 
-    fn snapshot(&self) -> BridgeState {
+    async fn snapshot(&self) -> BridgeState {
         let backend = self.backend.snapshot();
         let mut state = self.state.lock().clone();
-        state.service_ready = self.selected_asr_is_ready();
+        state.service_ready = self.selected_asr_is_ready().await;
         state.microphone_ready = backend.dictation.recording_ready;
         state
     }
 
-    fn update(&self, mutate: impl FnOnce(&mut BridgeState)) -> BridgeState {
+    async fn update(&self, mutate: impl FnOnce(&mut BridgeState)) -> BridgeState {
         let mut state = self.state.lock();
         mutate(&mut state);
         state.touch();
         drop(state);
-        self.snapshot()
+        self.snapshot().await
     }
 
     async fn handle(self: &Arc<Self>, request: BridgeRequest) -> BridgeState {
         match request.action.as_str() {
-            "state" | "heartbeat" => self.snapshot(),
+            "state" | "heartbeat" => self.snapshot().await,
 
             "startRecording" => {
-                if !self.selected_asr_is_ready() {
+                if !self.selected_asr_is_ready().await {
                     return self.update(|state| {
                         state.status = "error".into();
                         state.last_error = Some("请先在 OpenLess 中登录 GPT".into());
-                    });
+                    }).await;
                 }
 
                 let request_id = request.request_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
@@ -117,7 +170,7 @@ impl KeyboardBridge {
                     state.transcribed_text = None;
                     state.result_created_at = None;
                     state.last_error = None;
-                });
+                }).await;
 
                 let this = Arc::clone(self);
                 tauri::async_runtime::spawn(async move {
@@ -126,45 +179,65 @@ impl KeyboardBridge {
                             this.update(|state| {
                                 state.status = "error".into();
                                 state.last_error = Some(error.to_string());
-                            });
+                            }).await;
                             return;
                         }
                     }
 
-                    match this.backend.start_dictation_with_options(DictationStartOptions {
+                    match this.backend.start_external_dictation_with_options(DictationStartOptions {
                         insert_text: false,
                         ..DictationStartOptions::default()
                     }).await {
-                        Ok(_) => {
-                            this.update(|state| {
-                                state.status = "recording".into();
-                                state.last_error = None;
-                            });
+                        Ok(session_id) => {
+                            *this.session.lock() = Some(session_id);
+                            if start_native_audio() {
+                                this.update(|state| {
+                                    state.status = "recording".into();
+                                    state.last_error = None;
+                                }).await;
+                            } else {
+                                this.session.lock().take();
+                                let _ = this.backend.cancel_dictation(Some(session_id)).await;
+                                this.update(|state| {
+                                    state.status = "error".into();
+                                    state.last_error = Some("OpenLess 无法启动 iPhone 麦克风采集".into());
+                                }).await;
+                            }
                         }
                         Err(error) => {
                             this.update(|state| {
                                 state.status = "error".into();
                                 state.last_error = Some(error.to_string());
-                            });
+                            }).await;
                         }
                     }
                 });
 
-                self.snapshot()
+                self.snapshot().await
             }
 
             "stopRecording" => {
                 self.update(|state| {
                     state.status = "transcribing".into();
                     state.last_error = None;
-                });
+                }).await;
 
                 let this = Arc::clone(self);
                 tauri::async_runtime::spawn(async move {
-                    let result = this.backend.stop_dictation_with_options(DictationStopOptions {
-                        translation_requested: None,
-                        quick_note: Some(false),
-                    }).await;
+                    stop_native_audio();
+                    let session_id = this.session.lock().take();
+                    let result = match session_id {
+                        Some(_) => this.backend.stop_dictation_with_options(
+                            DictationStopOptions {
+                                translation_requested: None,
+                                quick_note: Some(false),
+                            },
+                        ).await,
+                        None => Err(openless_core::BackendError::new(
+                            openless_core::BackendErrorCode::InvalidState,
+                            "native audio session is not active",
+                        )),
+                    };
 
                     match result {
                         Ok(result) => {
@@ -178,18 +251,18 @@ impl KeyboardBridge {
                                 state.transcribed_text = Some(text);
                                 state.result_created_at = Some(apple_reference_seconds_now());
                                 state.last_error = None;
-                            });
+                            }).await;
                         }
                         Err(error) => {
                             this.update(|state| {
                                 state.status = "error".into();
                                 state.last_error = Some(error.to_string());
-                            });
+                            }).await;
                         }
                     }
                 });
 
-                self.snapshot()
+                self.snapshot().await
             }
 
             "acknowledgeResult" => self.update(|state| {
@@ -198,12 +271,12 @@ impl KeyboardBridge {
                 state.transcribed_text = None;
                 state.result_created_at = None;
                 state.last_error = None;
-            }),
+            }).await,
 
             _ => self.update(|state| {
                 state.status = "error".into();
                 state.last_error = Some("未知键盘命令".into());
-            }),
+            }).await,
         }
     }
 }
@@ -213,7 +286,9 @@ pub fn start(backend: Arc<OpenLessBackend>) {
         backend,
         state: Mutex::new(BridgeState::new()),
         mode: Mutex::new(TranscriptionMode::Smart),
+        session: Mutex::new(None),
     });
+    let _ = NATIVE_AUDIO_BRIDGE.set(Arc::downgrade(&bridge));
 
     tauri::async_runtime::spawn(async move {
         loop {

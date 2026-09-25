@@ -184,6 +184,73 @@ text = text.replace(test_anchor, test, 1)
 
 p.write_text(text)
 
+# Overview/status used to bypass CredentialDirectory and read the legacy Vault
+# active value directly. Reconcile both channel slots before every status read
+# so the overview, keyboard bridge and runtime provider all observe the same
+# first-enabled Channel identity.
+api_p = Path("crates/openless-core/src/api.rs")
+api_text = api_p.read_text()
+
+old_status = """    pub async fn get_credentials_status(&self) -> Result<CredentialsStatus, BackendError> {
+        let status = self
+            .deps
+            .credential_store
+            .status(self.get_preferences())
+            .await?;
+"""
+new_status = """    pub async fn get_credentials_status(&self) -> Result<CredentialsStatus, BackendError> {
+        // Status adapters read the persisted provider snapshot. Canonicalize it
+        // through the same directory used by ChannelList and dictation routing
+        // before exposing it to Overview.
+        let _ = self
+            .deps
+            .credential_store
+            .active_provider(ProviderSlot::Asr)
+            .await?;
+        let _ = self
+            .deps
+            .credential_store
+            .active_provider(ProviderSlot::Llm)
+            .await?;
+        let status = self
+            .deps
+            .credential_store
+            .status(self.get_preferences())
+            .await?;
+"""
+if old_status not in api_text:
+    raise SystemExit("get_credentials_status reconciliation anchor missing")
+api_text = api_text.replace(old_status, new_status, 1)
+
+old_refresh = """    async fn refresh_and_publish_credentials(&self) -> Result<CredentialsStatus, BackendError> {
+        let status = self
+            .deps
+            .credential_store
+            .status(self.get_preferences())
+            .await?;
+"""
+new_refresh = """    async fn refresh_and_publish_credentials(&self) -> Result<CredentialsStatus, BackendError> {
+        let _ = self
+            .deps
+            .credential_store
+            .active_provider(ProviderSlot::Asr)
+            .await?;
+        let _ = self
+            .deps
+            .credential_store
+            .active_provider(ProviderSlot::Llm)
+            .await?;
+        let status = self
+            .deps
+            .credential_store
+            .status(self.get_preferences())
+            .await?;
+"""
+if old_refresh not in api_text:
+    raise SystemExit("refresh credential reconciliation anchor missing")
+api_text = api_text.replace(old_refresh, new_refresh, 1)
+api_p.write_text(api_text)
+
 final = p.read_text()
 for expected in (
     "first_channel_replaces_stale_legacy_active_provider",
@@ -192,3 +259,7 @@ for expected in (
 ):
     if expected not in final:
         raise SystemExit(f"canonical active channel patch missing: {expected}")
+
+api_final = api_p.read_text()
+if api_final.count(".active_provider(ProviderSlot::Asr)") < 2:
+    raise SystemExit("credential status does not reconcile the active ASR channel")

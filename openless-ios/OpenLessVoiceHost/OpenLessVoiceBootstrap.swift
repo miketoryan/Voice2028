@@ -17,6 +17,8 @@ final class OpenLessVoiceBootstrap: NSObject {
     private let keepAliveEngine = AVAudioEngine()
     private let keepAlivePlayer = AVAudioPlayerNode()
     private var keepAliveConfigured = false
+    private lazy var nativeAudioCapture = OpenLessNativeAudioCapture(engine: keepAliveEngine)
+    private var nativeAudioError: String?
 
     @objc func start() {
         NotificationCenter.default.addObserver(
@@ -115,6 +117,30 @@ final class OpenLessVoiceBootstrap: NSObject {
                 error.localizedDescription
             )
         }
+    }
+
+    /// The Rust keyboard bridge calls these selectors through a tiny Objective-C
+    /// C shim. Capture uses the already-running keep-alive engine, while Core
+    /// still owns the session, provider resolution, transcription and history.
+    @objc func startNativeAudioCapture() -> NSNumber {
+        startBackgroundKeepAliveIfNeeded()
+        do {
+            try nativeAudioCapture.start()
+            nativeAudioError = nil
+            return NSNumber(value: true)
+        } catch {
+            nativeAudioError = error.localizedDescription
+            NSLog("[OpenLess Audio] native capture start failed: %@", error.localizedDescription)
+            return NSNumber(value: false)
+        }
+    }
+
+    @objc func stopNativeAudioCapture() {
+        nativeAudioCapture.stop()
+    }
+
+    @objc func nativeAudioCaptureError() -> NSString? {
+        nativeAudioError as NSString?
     }
 
     private func startBridgePolling() {

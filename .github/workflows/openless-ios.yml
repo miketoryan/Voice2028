@@ -175,6 +175,7 @@ jobs:
           # remains owned by OpenLess' native pipeline.
           cp "$SRC_DIR/OpenLessVoiceBootstrap.swift" "$HOST_DIR/OpenLessVoiceBootstrap.swift"
           cp "$SRC_DIR/OpenLessVoiceBootstrap.m" "$HOST_DIR/OpenLessVoiceBootstrap.m"
+          cp "$SRC_DIR/OpenLessNativeAudioCapture.swift" "$HOST_DIR/OpenLessNativeAudioCapture.swift"
           cp "$GITHUB_WORKSPACE/voiceking-ref/VoiceKey/Services/ChatGPTAuthManager.swift" "$HOST_DIR/ChatGPTAuthManager.swift"
           cp "$GITHUB_WORKSPACE/voiceking-ref/VoiceKey/Services/KeychainStore.swift" "$HOST_DIR/KeychainStore.swift"
           cp "$GITHUB_WORKSPACE/voiceking-ref/VoiceKey/Services/OAuthCallbackServer.swift" "$HOST_DIR/OAuthCallbackServer.swift"
@@ -490,6 +491,7 @@ jobs:
           set -euo pipefail
           python3 "$GITHUB_WORKSPACE/adapter/openless-ios/scripts/wire_ios_asr_active_channel.py"
           grep -q "directory_repairs_stale_active_provider_to_first_enabled_channel" crates/openless-core/src/credentials.rs
+          grep -q "Status adapters read the persisted provider snapshot" crates/openless-core/src/api.rs
           ! grep -q "target_os = \"ios\"" crates/openless-core/src/provider_resolution.rs
 
       - name: Test current-channel persistence and provider routing contract
@@ -522,6 +524,8 @@ jobs:
           python3 "$GITHUB_WORKSPACE/adapter/openless-ios/scripts/wire_ios_keyboard_bridge.py"
           grep -q "127.0.0.1" src-tauri/src/ios_keyboard_bridge.rs
           grep -q "ios_keyboard_bridge::start" src-tauri/src/mobile_runtime.rs
+          grep -q "start_external_dictation_with_options" src-tauri/src/ios_keyboard_bridge.rs
+          grep -q "openless_ios_audio_pcm" src-tauri/src/ios_keyboard_bridge.rs
 
       - name: Add OpenLess original-style iOS keyboard extension
         working-directory: upstream/openless-all/app
@@ -693,6 +697,8 @@ jobs:
             grep -Fq "https://chatgpt.com/backend-api/transcribe" "$RUNNER_TEMP/openless-main-binary.strings"
             grep -Fq "chatgpt_oauth" "$RUNNER_TEMP/openless-main-binary.strings"
             grep -Fq "chatgpt-transcribe" "$RUNNER_TEMP/openless-main-binary.strings"
+            grep -Fq "native audio session is not active" "$RUNNER_TEMP/openless-main-binary.strings"
+            grep -Fq "OpenLess could not prepare 16 kHz speech audio" "$RUNNER_TEMP/openless-main-binary.strings"
           fi
           if [ -d upstream/openless-all/app/src-tauri/gen/apple/build ]; then
             tar -czf artifact/openless-ios-build-tree.tgz -C upstream/openless-all/app/src-tauri/gen/apple build || true
@@ -706,4 +712,3 @@ jobs:
           path: artifact/
           if-no-files-found: warn
           retention-days: 14
-

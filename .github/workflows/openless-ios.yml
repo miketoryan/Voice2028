@@ -33,6 +33,14 @@ jobs:
           path: adapter
           fetch-depth: 1
 
+      - name: Checkout VoiceKing GPT reference
+        uses: actions/checkout@v4
+        with:
+          repository: miketoryan/VoiceKing
+          ref: main
+          path: voiceking-ref
+          fetch-depth: 1
+
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
@@ -91,7 +99,7 @@ jobs:
           plist["UIBackgroundModes"] = ["audio"]
           plist["CFBundleURLTypes"] = [{
               "CFBundleURLName": "VoiceKey OAuth",
-              "CFBundleURLSchemes": ["voicekey", "openless"]
+              "CFBundleURLSchemes": ["voicekey", "openless", "voiceking"]
           }]
           with info.open("wb") as fh:
               plistlib.dump(plist, fh, sort_keys=False)
@@ -140,6 +148,18 @@ jobs:
           cp "$SRC_DIR"/*.swift "$HOST_DIR/"
           cp "$SRC_DIR"/*.m "$HOST_DIR/"
 
+          # Reuse the already-tested VoiceKing ChatGPT account login,
+          # transcription, smart cleanup, audio lifecycle and localhost bridge.
+          cp "$GITHUB_WORKSPACE/voiceking-ref/Shared/SharedBridge.swift" "$HOST_DIR/SharedBridge.swift"
+          cp "$GITHUB_WORKSPACE/voiceking-ref/VoiceKey/AppModel.swift" "$HOST_DIR/AppModel.swift"
+          cp "$GITHUB_WORKSPACE/voiceking-ref/VoiceKey/Services/AudioService.swift" "$HOST_DIR/AudioService.swift"
+          cp "$GITHUB_WORKSPACE/voiceking-ref/VoiceKey/Services/ChatGPTAuthManager.swift" "$HOST_DIR/ChatGPTAuthManager.swift"
+          cp "$GITHUB_WORKSPACE/voiceking-ref/VoiceKey/Services/ChatGPTTranscriptionService.swift" "$HOST_DIR/ChatGPTTranscriptionService.swift"
+          cp "$GITHUB_WORKSPACE/voiceking-ref/VoiceKey/Services/ChatGPTCleanupService.swift" "$HOST_DIR/ChatGPTCleanupService.swift"
+          cp "$GITHUB_WORKSPACE/voiceking-ref/VoiceKey/Services/KeychainStore.swift" "$HOST_DIR/KeychainStore.swift"
+          cp "$GITHUB_WORKSPACE/voiceking-ref/VoiceKey/Services/LocalBridgeServer.swift" "$HOST_DIR/LocalBridgeServer.swift"
+          cp "$GITHUB_WORKSPACE/voiceking-ref/VoiceKey/Services/OAuthCallbackServer.swift" "$HOST_DIR/OAuthCallbackServer.swift"
+
           gem install xcodeproj --no-document
 
           ruby <<'RUBY'
@@ -175,6 +195,19 @@ jobs:
           project.save
           RUBY
 
+      - name: Smoke-build OpenLess GPT voice host
+        working-directory: upstream/openless-all/app
+        shell: bash
+        run: |
+          xcodebuild \
+            -project src-tauri/gen/apple/openless.xcodeproj \
+            -target openless_iOS \
+            -sdk iphoneos \
+            -configuration Release \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            build
+
       - name: Add OpenLess original-style iOS keyboard extension
         working-directory: upstream/openless-all/app
         shell: bash
@@ -188,7 +221,7 @@ jobs:
 
           cp "$SRC_DIR/KeyboardViewController.swift" "$EXT_DIR/KeyboardViewController.swift"
           cp "$SRC_DIR/Info.plist" "$EXT_DIR/Info.plist"
-          cp "$GITHUB_WORKSPACE/adapter/openless-ios/OpenLessVoiceHost/SharedBridge.swift" "$EXT_DIR/SharedBridge.swift"
+          cp "$GITHUB_WORKSPACE/voiceking-ref/Shared/SharedBridge.swift" "$EXT_DIR/SharedBridge.swift"
 
           # Reuse OpenLess' own keyboard assets/dictionaries instead of VoiceKey assets.
           cp "$GITHUB_WORKSPACE/upstream/openless-all/app/android/assets/openless_wordmark.png" "$EXT_DIR/openless_wordmark.png"
@@ -311,7 +344,7 @@ jobs:
           find upstream/openless-all/app/src-tauri/gen/apple/build -type f \( -name "*.ipa" -o -name "*.xcarchive" \) -maxdepth 5 -print 2>/dev/null || true
           IPA="$(find upstream/openless-all/app/src-tauri/gen/apple/build -type f -name "*.ipa" -print -quit 2>/dev/null || true)"
           if [ -n "$IPA" ]; then
-            cp "$IPA" artifact/OpenLess-iOS-VoiceKey-AppID.ipa
+            cp "$IPA" artifact/OpenLess-iOS-GPT-Smart-Verbatim.ipa
 
             VERIFY_DIR="$RUNNER_TEMP/openless-verify"
             rm -rf "$VERIFY_DIR"
@@ -345,7 +378,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: OpenLess-iOS-VoiceKey-AppID
+          name: OpenLess-iOS-GPT-Smart-Verbatim
           path: artifact/
           if-no-files-found: warn
           retention-days: 14

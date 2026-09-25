@@ -172,7 +172,7 @@ final class AudioService: @unchecked Sendable {
     private func prepareCaptureSession(_ session: AVAudioSession) throws {
         let options: AVAudioSession.CategoryOptions = [
             .mixWithOthers,
-            .allowBluetoothHFP
+            .allowBluetooth
         ]
         let categoryChanged =
             session.category != .playAndRecord

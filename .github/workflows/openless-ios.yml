@@ -404,12 +404,14 @@ jobs:
           # when an OAuth provider intentionally stores no per-channel model.
           p = Path("src/pages/settings/ChannelList.tsx")
           text = p.read_text()
-          old = """          const model = models[channel.id] ?? '';
-          const descriptor = descriptors.find((item) => item.providerType === channel.providerType);
-"""
-          new = """          const descriptor = descriptors.find((item) => item.providerType === channel.providerType);
-          const model = models[channel.id]?.trim() || descriptor?.defaultModel || '';
-"""
+          old = (
+              "          const model = models[channel.id] ?? '';\n"
+              "          const descriptor = descriptors.find((item) => item.providerType === channel.providerType);\n"
+          )
+          new = (
+              "          const descriptor = descriptors.find((item) => item.providerType === channel.providerType);\n"
+              "          const model = models[channel.id]?.trim() || descriptor?.defaultModel || '';\n"
+          )
           if old not in text:
               raise SystemExit("ChannelList model display anchor missing")
           text = text.replace(old, new, 1)
@@ -704,3 +706,4 @@ jobs:
           path: artifact/
           if-no-files-found: warn
           retention-days: 14
+

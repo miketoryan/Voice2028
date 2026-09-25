@@ -484,6 +484,16 @@ jobs:
           q.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n")
           PY
 
+      - name: Persist iOS AI services and fix Overview GPT status
+        working-directory: upstream/openless-all/app
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 "$GITHUB_WORKSPACE/adapter/openless-ios/scripts/wire_ios_credential_persistence.py"
+          grep -Fq 'cfg(any(target_os = "macos", target_os = "ios"))' src-tauri/Cargo.toml
+          grep -Fq 'cfg!(any(target_os = "macos", target_os = "ios"))' src-tauri/src/persistence/credentials.rs
+          grep -Fq 'active_asr_provider == "chatgpt_oauth"' src-tauri/src/commands/credentials.rs
+
       - name: Persist the current ASR channel canonically
         working-directory: upstream/openless-all/app
         shell: bash

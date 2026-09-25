@@ -1,0 +1,47 @@
+name: Publish OpenLess IPA direct download
+
+on:
+  push:
+    branches:
+      - openless-ios
+    paths:
+      - .github/workflows/publish-openless-ipa.yml
+  workflow_dispatch:
+
+permissions:
+  actions: read
+  contents: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download the verified IPA artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p release
+          gh run download 36150858910 \
+            --repo "$GITHUB_REPOSITORY" \
+            --name OpenLess-iOS-GPT-Providers \
+            --dir release
+          test -f release/OpenLess-iOS-GPT-Providers.ipa
+
+      - name: Publish stable direct-download release asset
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          TAG="openless-ios-gpt-asr"
+          IPA="release/OpenLess-iOS-GPT-Providers.ipa"
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$TAG" "$IPA" --clobber --repo "$GITHUB_REPOSITORY"
+          else
+            gh release create "$TAG" "$IPA" \
+              --repo "$GITHUB_REPOSITORY" \
+              --target "$GITHUB_SHA" \
+              --title "OpenLess iOS GPT ASR" \
+              --notes "Unsigned OpenLess iOS IPA with the native GPT ASR channel. Sign and install with AltStore or AltServer." \
+              --prerelease
+          fi

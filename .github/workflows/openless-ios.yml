@@ -226,6 +226,19 @@ jobs:
           echo "Injected targets:"
           xcodebuild -project "$GEN_APPLE/openless.xcodeproj" -list
 
+      - name: Smoke-build OpenLess keyboard extension
+        working-directory: upstream/openless-all/app
+        shell: bash
+        run: |
+          xcodebuild \
+            -project src-tauri/gen/apple/openless.xcodeproj \
+            -target OpenLessKeyboard \
+            -sdk iphoneos \
+            -configuration Release \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            build
+
       - name: Build unsigned iOS IPA
         working-directory: upstream/openless-all/app
         env:

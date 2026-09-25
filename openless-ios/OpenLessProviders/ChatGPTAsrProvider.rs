@@ -157,32 +157,3 @@ impl TranscriptionSession for ChatGptOAuthTranscriptionSession {
 fn provider_error(message: impl Into<String>) -> BackendError {
     BackendError::new(BackendErrorCode::Provider, message.into())
 }
-
-
-struct ValidationSink;
-
-impl openless_core::TextStreamSink for ValidationSink {
-    fn publish(
-        &self,
-        _chunk: openless_core::TextStreamChunk,
-    ) -> Result<(), openless_core::BackendError> {
-        Ok(())
-    }
-}
-
-pub async fn validate_oauth_provider() -> Result<(), openless_core::BackendError> {
-    let engine = ChatGptOAuthTranscriptionEngine::new();
-    let context = Arc::new(DictationContext::default());
-    let session = engine
-        .start(
-            SessionId::new(),
-            context,
-            Arc::new(ValidationSink),
-        )
-        .await?;
-
-    // 500 ms of canonical 16 kHz mono Int16 silence. The ChatGPT endpoint may
-    // return empty text for silence; HTTP/auth success is what this check needs.
-    session.consume_pcm_chunk(&vec![0_u8; 16_000]);
-    session.finish().await.map(|_| ())
-}

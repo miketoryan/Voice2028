@@ -1,80 +1,194 @@
 from pathlib import Path
 
-p = Path("crates/openless-core/src/provider_resolution.rs")
+
+p = Path("crates/openless-core/src/credentials.rs")
 text = p.read_text()
 
-old = """    let provider_id = match credential_store.active_provider(slot).await {
-        Ok(provider) if !provider.trim().is_empty() => provider,
-        Ok(_) => preference_fallback.to_string(),
-        Err(error) if error.code == BackendErrorCode::Unsupported => {
-            preference_fallback.to_string()
-        }
-        Err(error) => return Err(error),
-    };
+# ChannelList's public contract is "the first enabled card is current". Keep
+# the persisted active provider on exactly that same channel, including when a
+# user upgrades from a stale legacy active provider that is no longer a card.
+old_directory_reads = """    pub async fn list_channels(
+        &self,
+        kind: ChannelKind,
+    ) -> Result<Vec<ChannelSummary>, BackendError> {
+        Ok(self.store.load_metadata().await?.list_channels(kind))
+    }
+
+    pub async fn active_provider(&self, slot: ProviderSlot) -> Result<String, BackendError> {
+        Ok(self.store.load_metadata().await?.active_provider(slot))
+    }
 """
 
-new = """    let provider_id = {
-        #[cfg(target_os = "ios")]
-        {
-            if matches!(slot, ProviderSlot::Asr) {
-                match credential_store.list_channels(ChannelKind::Asr).await {
-                    Ok(channels) => {
-                        if let Some(channel) = channels.into_iter().find(|channel| channel.enabled) {
-                            channel.id
-                        } else {
-                            match credential_store.active_provider(slot).await {
-                                Ok(provider) if !provider.trim().is_empty() => provider,
-                                Ok(_) => preference_fallback.to_string(),
-                                Err(error) if error.code == BackendErrorCode::Unsupported => {
-                                    preference_fallback.to_string()
-                                }
-                                Err(error) => return Err(error),
-                            }
-                        }
-                    }
-                    Err(error) if error.code == BackendErrorCode::Unsupported => {
-                        match credential_store.active_provider(slot).await {
-                            Ok(provider) if !provider.trim().is_empty() => provider,
-                            Ok(_) => preference_fallback.to_string(),
-                            Err(error) if error.code == BackendErrorCode::Unsupported => {
-                                preference_fallback.to_string()
-                            }
-                            Err(error) => return Err(error),
-                        }
-                    }
-                    Err(error) => return Err(error),
-                }
-            } else {
-                match credential_store.active_provider(slot).await {
-                    Ok(provider) if !provider.trim().is_empty() => provider,
-                    Ok(_) => preference_fallback.to_string(),
-                    Err(error) if error.code == BackendErrorCode::Unsupported => {
-                        preference_fallback.to_string()
-                    }
-                    Err(error) => return Err(error),
-                }
-            }
+new_directory_reads = """    pub async fn list_channels(
+        &self,
+        kind: ChannelKind,
+    ) -> Result<Vec<ChannelSummary>, BackendError> {
+        let _guard = self.mutation_gate.lock().await;
+        let mut metadata = self.store.load_metadata().await?;
+        let repaired = metadata.reconcile_active_provider(kind);
+        let channels = metadata.list_channels(kind);
+        if repaired {
+            self.store.save_metadata(metadata).await?;
         }
+        Ok(channels)
+    }
 
-        #[cfg(not(target_os = "ios"))]
-        {
-            match credential_store.active_provider(slot).await {
-                Ok(provider) if !provider.trim().is_empty() => provider,
-                Ok(_) => preference_fallback.to_string(),
-                Err(error) if error.code == BackendErrorCode::Unsupported => {
-                    preference_fallback.to_string()
-                }
-                Err(error) => return Err(error),
-            }
+    pub async fn active_provider(&self, slot: ProviderSlot) -> Result<String, BackendError> {
+        let _guard = self.mutation_gate.lock().await;
+        let mut metadata = self.store.load_metadata().await?;
+        let repaired = match slot {
+            ProviderSlot::Asr => metadata.reconcile_active_provider(ChannelKind::Asr),
+            ProviderSlot::Llm => metadata.reconcile_active_provider(ChannelKind::Llm),
+            ProviderSlot::Omni => false,
+        };
+        let active = metadata.active_provider(slot);
+        if repaired {
+            self.store.save_metadata(metadata).await?;
         }
-    };
+        Ok(active)
+    }
 """
 
-if old not in text:
-    raise SystemExit("provider resolution anchor missing")
+if old_directory_reads not in text:
+    raise SystemExit("credential directory read anchors missing")
+text = text.replace(old_directory_reads, new_directory_reads, 1)
 
-text = text.replace(old, new, 1)
+# The first channel must replace an unmanaged legacy fallback such as
+# "volcengine". Otherwise the UI can label GPT current while active_providers
+# still points at that fallback.
+old_managed = """            || self
+                .channels
+                .get(&mutation_kind)
+                .is_some_and(|channels| channels.iter().any(|channel| channel.id == active));
+"""
+new_managed = """            || self
+                .channels
+                .get(&mutation_kind)
+                .is_none_or(|channels| channels.is_empty())
+            || self
+                .channels
+                .get(&mutation_kind)
+                .is_some_and(|channels| channels.iter().any(|channel| channel.id == active));
+"""
+if old_managed not in text:
+    raise SystemExit("active channel ownership anchor missing")
+text = text.replace(old_managed, new_managed, 1)
+
+old_sync = """    fn sync_active(&mut self, kind: ChannelKind) {
+        let slot = slot_for_kind(kind);
+        let active = self
+            .channels
+            .get(&kind)
+            .and_then(|channels| channels.iter().find(|channel| channel.enabled))
+            .map(|channel| channel.id.clone())
+            .unwrap_or_default();
+        self.active_providers.insert(slot, active);
+    }
+"""
+new_sync = """    fn canonical_active_provider(&self, kind: ChannelKind) -> String {
+        self.channels
+            .get(&kind)
+            .and_then(|channels| channels.iter().find(|channel| channel.enabled))
+            .map(|channel| channel.id.clone())
+            .unwrap_or_default()
+    }
+
+    fn reconcile_active_provider(&mut self, kind: ChannelKind) -> bool {
+        let slot = slot_for_kind(kind);
+        let active = self.canonical_active_provider(kind);
+        if self.active_providers.get(&slot) == Some(&active) {
+            return false;
+        }
+        self.active_providers.insert(slot, active);
+        self.revision = self.revision.saturating_add(1);
+        true
+    }
+
+    fn sync_active(&mut self, kind: ChannelKind) {
+        let slot = slot_for_kind(kind);
+        let active = self.canonical_active_provider(kind);
+        self.active_providers.insert(slot, active);
+    }
+"""
+if old_sync not in text:
+    raise SystemExit("active channel synchronization anchor missing")
+text = text.replace(old_sync, new_sync, 1)
+
+test_anchor = """    #[test]
+    fn partial_reorder_preserves_unlisted_channel_order_and_blank_delete_is_safe() {
+"""
+test = """    #[test]
+    fn first_channel_replaces_stale_legacy_active_provider() {
+        let mut metadata = CredentialMetadata::from_parts(
+            vec![],
+            vec![],
+            "volcengine",
+            "",
+            "",
+            4,
+        );
+
+        let created = metadata
+            .apply_channel_mutation(
+                ChannelMutation::Create {
+                    kind: ChannelKind::Asr,
+                    provider_type: "chatgpt_oauth".to_string(),
+                    name: "GPT Speech Recognition".to_string(),
+                },
+                |_| false,
+            )
+            .unwrap();
+
+        assert_eq!(
+            created,
+            ChannelMutationResult::Created("chatgpt_oauth".to_string())
+        );
+        assert_eq!(
+            metadata.active_provider(ProviderSlot::Asr),
+            "chatgpt_oauth"
+        );
+    }
+
+    #[tokio::test]
+    async fn directory_repairs_stale_active_provider_to_first_enabled_channel() {
+        let repository = std::sync::Arc::new(InMemoryCredentialStore::default());
+        *repository.metadata.write().unwrap() = CredentialMetadata::from_parts(
+            vec![
+                summary("chatgpt_oauth", 0, true),
+                summary("volcengine", 1, true),
+            ],
+            vec![],
+            "volcengine",
+            "",
+            "",
+            8,
+        );
+        let metadata_store: std::sync::Arc<dyn CredentialMetadataStore> = repository.clone();
+        let directory = CredentialDirectory::new(metadata_store);
+
+        let channels = directory.list_channels(ChannelKind::Asr).await.unwrap();
+        assert_eq!(channels[0].id, "chatgpt_oauth");
+        assert_eq!(
+            directory.active_provider(ProviderSlot::Asr).await.unwrap(),
+            "chatgpt_oauth"
+        );
+        assert_eq!(repository.load_metadata().await.unwrap().revision(), 9);
+    }
+
+    #[test]
+    fn partial_reorder_preserves_unlisted_channel_order_and_blank_delete_is_safe() {
+"""
+if test_anchor not in text:
+    raise SystemExit("credential tests anchor missing")
+text = text.replace(test_anchor, test, 1)
+
 p.write_text(text)
 
-if 'channels.into_iter().find(|channel| channel.enabled)' not in p.read_text():
-    raise SystemExit("iOS ASR first-enabled routing was not wired")
+final = p.read_text()
+for expected in (
+    "first_channel_replaces_stale_legacy_active_provider",
+    "directory_repairs_stale_active_provider_to_first_enabled_channel",
+    "reconcile_active_provider",
+):
+    if expected not in final:
+        raise SystemExit(f"canonical active channel patch missing: {expected}")

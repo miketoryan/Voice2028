@@ -319,7 +319,7 @@ jobs:
           )
           text = text.replace(
               '                "volcengine" | XFYUN_PROVIDER_ID | TENCENT_CLOUD_PROVIDER_ID => {\n',
-              '                "chatgpt_oauth" => ValidationProbe::Unsupported,\n                "volcengine" | XFYUN_PROVIDER_ID | TENCENT_CLOUD_PROVIDER_ID => {\n',
+              '                "chatgpt_oauth" => ValidationProbe::AsrNativeSilence,\n                "volcengine" | XFYUN_PROVIDER_ID | TENCENT_CLOUD_PROVIDER_ID => {\n',
               1,
           )
           text = text.replace(
@@ -400,6 +400,21 @@ jobs:
               text = text[:anchor_pos] + oauth_block + text[anchor_pos:]
           p.write_text(text)
 
+          # The channel card should show the descriptor's effective model even
+          # when an OAuth provider intentionally stores no per-channel model.
+          p = Path("src/pages/settings/ChannelList.tsx")
+          text = p.read_text()
+          old = """          const model = models[channel.id] ?? '';
+          const descriptor = descriptors.find((item) => item.providerType === channel.providerType);
+"""
+          new = """          const descriptor = descriptors.find((item) => item.providerType === channel.providerType);
+          const model = models[channel.id]?.trim() || descriptor?.defaultModel || '';
+"""
+          if old not in text:
+              raise SystemExit("ChannelList model display anchor missing")
+          text = text.replace(old, new, 1)
+          p.write_text(text)
+
           # 6) Localized labels only; preserve OpenLess' existing translation keys.
           locale_files = [
               Path("src/i18n/en.ts"),
@@ -458,7 +473,7 @@ jobs:
                   "providerType": "chatgpt_oauth",
                   "staticModels": [],
                   "supportedRequestFormats": [],
-                  "validationProbe": "unsupported",
+                  "validationProbe": "asr_native_silence",
               })
           for item in data["llm"]:
               if item.get("providerType") == "codex_oauth":
@@ -466,21 +481,23 @@ jobs:
           q.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n")
           PY
 
-      - name: Align iOS ASR runtime with current channel
+      - name: Persist the current ASR channel canonically
         working-directory: upstream/openless-all/app
         shell: bash
         run: |
           set -euo pipefail
           python3 "$GITHUB_WORKSPACE/adapter/openless-ios/scripts/wire_ios_asr_active_channel.py"
-          grep -q "channels.into_iter().find(|channel| channel.enabled)" crates/openless-core/src/provider_resolution.rs
+          grep -q "directory_repairs_stale_active_provider_to_first_enabled_channel" crates/openless-core/src/credentials.rs
+          ! grep -q "target_os = \"ios\"" crates/openless-core/src/provider_resolution.rs
 
-      - name: Wire real GPT ASR validation
+      - name: Test current-channel persistence and provider routing contract
         working-directory: upstream/openless-all/app
         shell: bash
         run: |
           set -euo pipefail
-          python3 "$GITHUB_WORKSPACE/adapter/openless-ios/scripts/wire_gpt_asr_validation.py"
-          grep -q "validate_oauth_provider" src-tauri/src/commands/providers.rs
+          cargo test -p openless-core first_channel_replaces_stale_legacy_active_provider
+          cargo test -p openless-core directory_repairs_stale_active_provider_to_first_enabled_channel
+          cargo test -p openless-core dictation_freezes_channel_identity_protocol_and_model_for_the_session
 
       - name: Wire GPT login into OpenLess AI service UI
         working-directory: upstream/openless-all/app
@@ -639,6 +656,7 @@ jobs:
           mkdir -p artifact
           find upstream/openless-all/app/src-tauri/gen/apple/build -type f \( -name "*.ipa" -o -name "*.xcarchive" \) -maxdepth 5 -print 2>/dev/null || true
           IPA="$(find upstream/openless-all/app/src-tauri/gen/apple/build -type f -name "*.ipa" -print -quit 2>/dev/null || true)"
+          test -n "$IPA"
           if [ -n "$IPA" ]; then
             cp "$IPA" artifact/OpenLess-iOS-GPT-Providers.ipa
 
@@ -655,16 +673,24 @@ jobs:
             KEYBOARD_ID=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$APP_PATH/PlugIns/OpenLessKeyboard.appex/Info.plist")
             EXT_POINT=$(/usr/libexec/PlistBuddy -c 'Print :NSExtension:NSExtensionPointIdentifier' "$APP_PATH/PlugIns/OpenLessKeyboard.appex/Info.plist")
             KEYBOARD_NAME=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleDisplayName' "$APP_PATH/PlugIns/OpenLessKeyboard.appex/Info.plist")
+            MICROPHONE_USAGE=$(/usr/libexec/PlistBuddy -c 'Print :NSMicrophoneUsageDescription' "$APP_PATH/Info.plist")
+            APP_EXECUTABLE=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$APP_PATH/Info.plist")
 
             echo "Main bundle: $APP_ID"
             echo "Keyboard bundle: $KEYBOARD_ID"
             echo "Keyboard display name: $KEYBOARD_NAME"
             echo "Extension point: $EXT_POINT"
+            echo "Microphone usage description: $MICROPHONE_USAGE"
 
             test "$APP_ID" = "com.miketoryan.VoiceKey"
             test "$KEYBOARD_ID" = "com.miketoryan.VoiceKey.Keyboard"
             test "$KEYBOARD_NAME" = "OpenLess"
             test "$EXT_POINT" = "com.apple.keyboard-service"
+            test -n "$MICROPHONE_USAGE"
+            strings "$APP_PATH/$APP_EXECUTABLE" > "$RUNNER_TEMP/openless-main-binary.strings"
+            grep -Fq "https://chatgpt.com/backend-api/transcribe" "$RUNNER_TEMP/openless-main-binary.strings"
+            grep -Fq "chatgpt_oauth" "$RUNNER_TEMP/openless-main-binary.strings"
+            grep -Fq "chatgpt-transcribe" "$RUNNER_TEMP/openless-main-binary.strings"
           fi
           if [ -d upstream/openless-all/app/src-tauri/gen/apple/build ]; then
             tar -czf artifact/openless-ios-build-tree.tgz -C upstream/openless-all/app/src-tauri/gen/apple build || true

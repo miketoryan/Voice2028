@@ -71,11 +71,19 @@ struct KeyboardBridge {
 }
 
 impl KeyboardBridge {
+    fn chatgpt_login_required(&self) -> bool {
+        self.backend.snapshot().credentials.active_asr_provider == crate::chatgpt_asr::PROVIDER_ID
+    }
+
+    fn selected_asr_is_ready(&self) -> bool {
+        !self.chatgpt_login_required()
+            || openless_core::polish::CodexOAuthCredentials::load_default().is_ok()
+    }
+
     fn snapshot(&self) -> BridgeState {
         let backend = self.backend.snapshot();
         let mut state = self.state.lock().clone();
-        state.service_ready =
-            openless_core::polish::CodexOAuthCredentials::load_default().is_ok();
+        state.service_ready = self.selected_asr_is_ready();
         state.microphone_ready = backend.dictation.recording_ready;
         state
     }
@@ -93,7 +101,7 @@ impl KeyboardBridge {
             "state" | "heartbeat" => self.snapshot(),
 
             "startRecording" => {
-                if !openless_core::polish::CodexOAuthCredentials::load_default().is_ok() {
+                if !self.selected_asr_is_ready() {
                     return self.update(|state| {
                         state.status = "error".into();
                         state.last_error = Some("请先在 OpenLess 中登录 GPT".into());

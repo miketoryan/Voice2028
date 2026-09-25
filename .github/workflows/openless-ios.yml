@@ -333,10 +333,8 @@ jobs:
           # Documents/OpenLessGPT/auth.json path from app startup onward.
           p = Path("src-tauri/src/mobile_runtime.rs")
           text = p.read_text()
-          setup_anchor = """        .setup(|app| {
-            #[cfg(target_os = "android")]
-          """
-          setup_addition = """        .setup(|app| {
+          setup_anchor = ".setup(|app| {"
+          setup_addition = """.setup(|app| {
             #[cfg(target_os = "ios")]
             {
                 use tauri::Manager;
@@ -351,8 +349,6 @@ jobs:
                     directory.join("auth.json"),
                 );
             }
-
-            #[cfg(target_os = "android")]
           """
           if 'OPENLESS_CODEX_AUTH_PATH' not in text:
               if setup_anchor not in text:

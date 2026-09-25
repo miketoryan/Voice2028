@@ -7,6 +7,7 @@ on:
       - openless-ios
     paths:
       - ".github/workflows/openless-ios.yml"
+      - "openless-ios/**"
   workflow_dispatch:
 
 jobs:
@@ -126,6 +127,54 @@ jobs:
           CI: "true"
         run: npx tauri ios init --ci
 
+      - name: Add OpenLess GPT voice host
+        working-directory: upstream/openless-all/app
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          GEN_APPLE="src-tauri/gen/apple"
+          SRC_DIR="$GITHUB_WORKSPACE/adapter/openless-ios/OpenLessVoiceHost"
+          HOST_DIR="$GEN_APPLE/OpenLessVoiceHost"
+          mkdir -p "$HOST_DIR"
+          cp "$SRC_DIR"/*.swift "$HOST_DIR/"
+          cp "$SRC_DIR"/*.m "$HOST_DIR/"
+
+          gem install xcodeproj --no-document
+
+          ruby <<'RUBY'
+          require 'xcodeproj'
+
+          project_path = 'src-tauri/gen/apple/openless.xcodeproj'
+          project = Xcodeproj::Project.open(project_path)
+
+          main_target = project.targets.find { |t| t.name == 'openless_iOS' }
+          abort('OpenLess iOS target not found') unless main_target
+
+          group = project.main_group.groups.find { |g| g.display_name == 'OpenLessVoiceHost' }
+          group ||= project.main_group.new_group('OpenLessVoiceHost', 'OpenLessVoiceHost')
+
+          source_names = Dir.glob('src-tauri/gen/apple/OpenLessVoiceHost/*.{swift,m}').map { |p| File.basename(p) }.sort
+          refs = {}
+          source_names.each do |name|
+            ref = group.files.find { |f| f.path == name }
+            ref ||= group.new_file(name)
+            refs[name] = ref
+          end
+
+          existing = main_target.source_build_phase.files_references
+          refs.each_value do |ref|
+            main_target.source_build_phase.add_file_reference(ref, true) unless existing.include?(ref)
+          end
+
+          main_target.build_configurations.each do |config|
+            config.build_settings['SWIFT_VERSION'] = '6.0'
+            config.build_settings['IPHONEOS_DEPLOYMENT_TARGET'] = '17.0'
+          end
+
+          project.save
+          RUBY
+
       - name: Add OpenLess original-style iOS keyboard extension
         working-directory: upstream/openless-all/app
         shell: bash
@@ -139,6 +188,7 @@ jobs:
 
           cp "$SRC_DIR/KeyboardViewController.swift" "$EXT_DIR/KeyboardViewController.swift"
           cp "$SRC_DIR/Info.plist" "$EXT_DIR/Info.plist"
+          cp "$GITHUB_WORKSPACE/adapter/openless-ios/OpenLessVoiceHost/SharedBridge.swift" "$EXT_DIR/SharedBridge.swift"
 
           # Reuse OpenLess' own keyboard assets/dictionaries instead of VoiceKey assets.
           cp "$GITHUB_WORKSPACE/upstream/openless-all/app/android/assets/openless_wordmark.png" "$EXT_DIR/openless_wordmark.png"
@@ -166,6 +216,7 @@ jobs:
           refs = {}
           %w[
             KeyboardViewController.swift
+            SharedBridge.swift
             Info.plist
             openless_wordmark.png
             stroke.dict.tsv
@@ -177,9 +228,15 @@ jobs:
             refs[name] = ref
           end
 
-          source_ref = refs['KeyboardViewController.swift']
-          unless ext_target.source_build_phase.files_references.include?(source_ref)
-            ext_target.source_build_phase.add_file_reference(source_ref, true)
+          source_refs = [
+            refs['KeyboardViewController.swift'],
+            refs['SharedBridge.swift']
+          ]
+          existing_sources = ext_target.source_build_phase.files_references
+          source_refs.each do |source_ref|
+            unless existing_sources.include?(source_ref)
+              ext_target.source_build_phase.add_file_reference(source_ref, true)
+            end
           end
 
           %w[

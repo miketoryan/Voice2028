@@ -158,6 +158,40 @@ jobs:
           cp "$GITHUB_WORKSPACE/voiceking-ref/VoiceKey/Services/KeychainStore.swift" "$HOST_DIR/KeychainStore.swift"
           cp "$GITHUB_WORKSPACE/voiceking-ref/VoiceKey/Services/OAuthCallbackServer.swift" "$HOST_DIR/OAuthCallbackServer.swift"
 
+          # Tauri can own more than one UIWindow. Bind ASWebAuthenticationSession
+          # to the exact OpenLess foreground window instead of guessing it.
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path("src-tauri/gen/apple/OpenLessVoiceHost/ChatGPTAuthManager.swift")
+          text = p.read_text()
+          text = text.replace(
+              '    private var authSession: ASWebAuthenticationSession?\n',
+              '    private var authSession: ASWebAuthenticationSession?\n    weak var presentationWindow: UIWindow?\n',
+              1,
+          )
+          text = text.replace(
+              '            self.authSession = session\n            session.start()\n',
+              '            self.authSession = session\n            if !session.start() {\n                self.authSession = nil\n                continuation.resume(throwing: AuthError.sessionStartFailed)\n            }\n',
+              1,
+          )
+          text = text.replace(
+              '    func presentationAnchor(for session: ASWebAuthenticationSession) -> ASPresentationAnchor {\n        let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }\n',
+              '    func presentationAnchor(for session: ASWebAuthenticationSession) -> ASPresentationAnchor {\n        if let presentationWindow { return presentationWindow }\n        let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }\n',
+              1,
+          )
+          text = text.replace(
+              '        case refreshUnavailable\n',
+              '        case refreshUnavailable\n        case sessionStartFailed\n',
+              1,
+          )
+          text = text.replace(
+              '            case .refreshUnavailable: "The ChatGPT session cannot be refreshed. Sign in again."\n',
+              '            case .refreshUnavailable: "The ChatGPT session cannot be refreshed. Sign in again."\n            case .sessionStartFailed: "The ChatGPT login window could not be opened."\n',
+              1,
+          )
+          p.write_text(text)
+          PY
+
           gem install xcodeproj --no-document
 
           ruby <<'RUBY'

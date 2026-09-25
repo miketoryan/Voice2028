@@ -466,6 +466,14 @@ jobs:
           q.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n")
           PY
 
+      - name: Align iOS ASR runtime with current channel
+        working-directory: upstream/openless-all/app
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 "$GITHUB_WORKSPACE/adapter/openless-ios/scripts/wire_ios_asr_active_channel.py"
+          grep -q "channels.into_iter().find(|channel| channel.enabled)" crates/openless-core/src/provider_resolution.rs
+
       - name: Wire real GPT ASR validation
         working-directory: upstream/openless-all/app
         shell: bash

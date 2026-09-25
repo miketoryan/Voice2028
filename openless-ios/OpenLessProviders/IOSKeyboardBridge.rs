@@ -142,10 +142,14 @@ impl KeyboardBridge {
     }
 
     async fn update(&self, mutate: impl FnOnce(&mut BridgeState)) -> BridgeState {
-        let mut state = self.state.lock();
-        mutate(&mut state);
-        state.touch();
-        drop(state);
+        {
+            let mut state = self.state.lock();
+            mutate(&mut state);
+            state.touch();
+        }
+        // Keep the parking_lot guard strictly inside the synchronous scope.
+        // tauri::async_runtime::spawn requires a Send future, so no guard may
+        // live across the await below.
         self.snapshot().await
     }
 

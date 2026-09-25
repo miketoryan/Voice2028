@@ -254,7 +254,7 @@ jobs:
           )
           text = text.replace(
               '(crate::polish::CODEX_OAUTH_PROVIDER_ID, "codexOAuth"),',
-              '(crate::polish::CODEX_OAUTH_PROVIDER_ID, "gptSmartCleanup"),',
+              '(crate::polish::CODEX_OAUTH_PROVIDER_ID, "codexOAuth"),',
               1,
           )
           text = text.replace(
@@ -298,7 +298,7 @@ jobs:
           text = p.read_text()
           text = text.replace(
               "  ['codex_oauth', 'codexOAuth'],",
-              "  ['codex_oauth', 'gptSmartCleanup'],",
+              "  ['codex_oauth', 'codexOAuth'],",
               1,
           )
           if "settings.providers.chatgptOAuthNotice" not in text:
@@ -309,7 +309,7 @@ jobs:
               oauth_block = """  if (descriptor?.authRequirement === 'o_auth') {
             return (
               <div style={{ fontSize: 11.5, color: 'var(--ol-ink-4)', lineHeight: 1.6 }}>
-                {t('settings.providers.chatgptOAuthNotice')}
+                {t('settings.providers.codexOAuthNotice')}
               </div>
             );
           }
@@ -318,32 +318,39 @@ jobs:
               text = text[:anchor_pos] + oauth_block + text[anchor_pos:]
           p.write_text(text)
 
-          # 6) Localized labels only; do not alter the rest of Settings UI.
-          replacements = {
-              "src/i18n/zh-CN.ts": [
-                  ("codexOAuth: 'Codex OAuth',", "gptSmartCleanup: 'GPT 智能整理',"),
-                  ("asrVolcengine: '火山引擎 bigasr',", "asrChatGPT: 'GPT 语音识别',\n        asrVolcengine: '火山引擎 bigasr',"),
-                  ("codexOAuthNotice:\n        'Codex OAuth 使用本机 Codex 登录状态（~/.codex/auth.json），无需在 OpenLess 中保存 API Key 或 Base URL。',",
-                   "codexOAuthNotice:\n        'GPT 智能整理使用当前 ChatGPT 登录状态，无需 API Key。',\n      chatgptOAuthNotice:\n        '使用当前 ChatGPT 登录状态，无需填写 API Key 或服务地址。',"),
-              ],
-              "src/i18n/en.ts": [
-                  ("codexOAuth: 'Codex OAuth',", "gptSmartCleanup: 'GPT Smart Cleanup',"),
-                  ("asrVolcengine: 'Volcengine bigasr',", "asrChatGPT: 'GPT Speech Recognition',\n        asrVolcengine: 'Volcengine bigasr',"),
-              ],
-          }
-          for filename, pairs in replacements.items():
-              q = Path(filename)
+          # 6) Localized labels only; preserve OpenLess' existing translation keys.
+          locale_files = list(Path("src/i18n").glob("*.ts"))
+          for q in locale_files:
               body = q.read_text()
-              for old, new in pairs:
-                  if old in body:
-                      body = body.replace(old, new, 1)
-              if filename.endswith("/en.ts") and "chatgptOAuthNotice:" not in body:
-                  marker = "codexOAuthNotice:"
-                  idx = body.find(marker)
-                  if idx >= 0:
-                      line_end = body.find("\n", idx)
-                      next_end = body.find("\n", line_end + 1)
-                      body = body[:next_end+1] + "      chatgptOAuthNotice: 'Uses your current ChatGPT sign-in. No API key or service URL is required.',\n" + body[next_end+1:]
+
+              # Reuse the existing codexOAuth key so every locale remains type-compatible.
+              if q.name == "zh-CN.ts":
+                  body = body.replace(
+                      "codexOAuth: 'Codex OAuth',",
+                      "codexOAuth: 'GPT 智能整理',",
+                      1,
+                  )
+                  body = body.replace(
+                      "codexOAuthNotice:\n        'Codex OAuth 使用本机 Codex 登录状态（~/.codex/auth.json），无需在 OpenLess 中保存 API Key 或 Base URL。',",
+                      "codexOAuthNotice:\n        '使用当前 ChatGPT 登录状态，无需填写 API Key 或服务地址。',",
+                      1,
+                  )
+                  asr_label = "GPT 语音识别"
+              elif q.name == "zh-TW.ts":
+                  asr_label = "GPT 語音識別"
+              else:
+                  asr_label = "GPT Speech Recognition"
+
+              # New ASR label must exist in every locale because i18n objects are structurally typed.
+              if "asrChatGPT:" not in body:
+                  marker = "asrVolcengine:"
+                  pos = body.find(marker)
+                  if pos < 0:
+                      raise SystemExit(f"{q}: asrVolcengine translation anchor missing")
+                  line_start = body.rfind("\n", 0, pos) + 1
+                  indent = body[line_start:pos]
+                  body = body[:line_start] + f"{indent}asrChatGPT: '{asr_label}',\n" + body[line_start:]
+
               q.write_text(body)
 
           # 7) Keep the generated frontend descriptor snapshot consistent with Core.
@@ -364,7 +371,7 @@ jobs:
               })
           for item in data["llm"]:
               if item.get("providerType") == "codex_oauth":
-                  item["labelKey"] = "gptSmartCleanup"
+                  item["labelKey"] = "codexOAuth"
           q.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n")
           PY
 

@@ -1,5 +1,5 @@
+import AVFoundation
 import Foundation
-import ObjectiveC.runtime
 import UIKit
 
 @MainActor
@@ -10,8 +10,13 @@ final class OpenLessVoiceBootstrap: NSObject {
     private let auth = ChatGPTAuthManager()
     private var loginRunning = false
     private var bridgeTimer: Timer?
-    private var urlHookInstalled = false
-    private var originalOpenURLIMP: IMP?
+
+    // No-jump design:
+    // keep the main process alive in the background so the keyboard can talk
+    // directly to the localhost OpenLess Core bridge without opening the app.
+    private let keepAliveEngine = AVAudioEngine()
+    private let keepAlivePlayer = AVAudioPlayerNode()
+    private var keepAliveConfigured = false
 
     @objc func start() {
         NotificationCenter.default.addObserver(
@@ -20,9 +25,15 @@ final class OpenLessVoiceBootstrap: NSObject {
             name: UIApplication.didBecomeActiveNotification,
             object: nil
         )
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(audioSessionInterrupted(_:)),
+            name: AVAudioSession.interruptionNotification,
+            object: AVAudioSession.sharedInstance()
+        )
 
         startBridgePolling()
-        installURLHookIfPossible()
+        startBackgroundKeepAliveIfNeeded()
 
         Task { @MainActor in
             await self.syncCredentialIfPossible()
@@ -30,111 +41,79 @@ final class OpenLessVoiceBootstrap: NSObject {
     }
 
     @objc private func applicationDidBecomeActive() {
-        installURLHookIfPossible()
+        startBackgroundKeepAliveIfNeeded()
         Task { @MainActor in
             await syncCredentialIfPossible()
         }
     }
 
-    private func installURLHookIfPossible() {
-        guard !urlHookInstalled,
-              let delegate = UIApplication.shared.delegate else { return }
+    @objc private func audioSessionInterrupted(_ notification: Notification) {
+        guard
+            let info = notification.userInfo,
+            let rawType = info[AVAudioSessionInterruptionTypeKey] as? UInt,
+            let type = AVAudioSession.InterruptionType(rawValue: rawType)
+        else { return }
 
-        let cls: AnyClass = type(of: delegate)
-        let selector = NSSelectorFromString("application:openURL:options:")
-        originalOpenURLIMP = class_getMethodImplementation(cls, selector)
-
-        typealias OpenBlock = @convention(block) (
-            AnyObject,
-            UIApplication,
-            NSURL,
-            NSDictionary
-        ) -> Bool
-
-        let block: OpenBlock = { [weak self] object, application, nsURL, options in
-            let url = nsURL as URL
-            if url.scheme?.lowercased() == "openless",
-               url.host?.lowercased() == "keyboard" {
-                Task { @MainActor [weak self] in
-                    self?.handleKeyboardURL(url)
-                }
-                return true
-            }
-
-            if let original = self?.originalOpenURLIMP {
-                typealias Original = @convention(c) (
-                    AnyObject,
-                    Selector,
-                    UIApplication,
-                    NSURL,
-                    NSDictionary
-                ) -> Bool
-                let function = unsafeBitCast(original, to: Original.self)
-                return function(object, selector, application, nsURL, options)
-            }
-            return false
+        if type == .ended {
+            startBackgroundKeepAliveIfNeeded(forceRestart: true)
         }
-
-        let implementation = imp_implementationWithBlock(block)
-        if let method = class_getInstanceMethod(cls, selector) {
-            method_setImplementation(method, implementation)
-        } else {
-            class_addMethod(cls, selector, implementation, "B@:@@@")
-        }
-        urlHookInstalled = true
     }
 
-    private func handleKeyboardURL(_ url: URL) {
-        guard let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
-              components.queryItems?.first(where: { $0.name == "action" })?.value == "start",
-              let requestID = components.queryItems?.first(where: { $0.name == "requestID" })?.value,
-              !requestID.isEmpty else {
-            return
-        }
+    private func startBackgroundKeepAliveIfNeeded(forceRestart: Bool = false) {
+        do {
+            let session = AVAudioSession.sharedInstance()
 
-        let mode = components.queryItems?
-            .first(where: { $0.name == "mode" })?
-            .value ?? "smart"
-
-        Task {
-            await sendKeyboardStartCommand(
-                requestID: requestID,
-                mode: mode
+            // Silent playback keeps the host process eligible for the existing
+            // "audio" background mode while mixing with any user audio.
+            try session.setCategory(
+                .playback,
+                mode: .default,
+                options: [.mixWithOthers]
             )
-        }
-    }
+            try session.setActive(true)
 
-    private func sendKeyboardStartCommand(
-        requestID: String,
-        mode: String
-    ) async {
-        guard let url = URL(string: "http://127.0.0.1:14557/command") else { return }
+            if !keepAliveConfigured {
+                let format = AVAudioFormat(
+                    standardFormatWithSampleRate: 44_100,
+                    channels: 1
+                )!
 
-        let payload: [String: Any] = [
-            "action": "startRecording",
-            "requestID": requestID,
-            "mode": mode
-        ]
-        guard let body = try? JSONSerialization.data(withJSONObject: payload) else { return }
+                let buffer = AVAudioPCMBuffer(
+                    pcmFormat: format,
+                    frameCapacity: 4_410
+                )!
+                buffer.frameLength = 4_410
+                // AVAudioPCMBuffer is zero-initialized, so this is 100 ms silence.
 
-        for _ in 0..<24 {
-            var request = URLRequest(url: url)
-            request.httpMethod = "POST"
-            request.httpBody = body
-            request.timeoutInterval = 1
-            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-            request.setValue("7", forHTTPHeaderField: "X-VoiceKing-Protocol")
-
-            do {
-                let (_, response) = try await URLSession.shared.data(for: request)
-                if (response as? HTTPURLResponse)?.statusCode == 200 {
-                    return
-                }
-            } catch {
-                // The Rust listener may still be resuming after app wake.
+                keepAliveEngine.attach(keepAlivePlayer)
+                keepAliveEngine.connect(
+                    keepAlivePlayer,
+                    to: keepAliveEngine.mainMixerNode,
+                    format: format
+                )
+                keepAlivePlayer.scheduleBuffer(
+                    buffer,
+                    at: nil,
+                    options: [.loops],
+                    completionHandler: nil
+                )
+                keepAliveConfigured = true
             }
 
-            try? await Task.sleep(for: .milliseconds(120))
+            if forceRestart, keepAliveEngine.isRunning {
+                keepAliveEngine.stop()
+            }
+            if !keepAliveEngine.isRunning {
+                try keepAliveEngine.start()
+            }
+            if !keepAlivePlayer.isPlaying {
+                keepAlivePlayer.play()
+            }
+        } catch {
+            NSLog(
+                "[OpenLess Background] keep-alive start failed: %@",
+                error.localizedDescription
+            )
         }
     }
 
@@ -287,4 +266,3 @@ final class OpenLessVoiceBootstrap: NSObject {
             ?? scenes.flatMap(\.windows).first
     }
 }
-

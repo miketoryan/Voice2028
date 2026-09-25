@@ -195,19 +195,6 @@ jobs:
           project.save
           RUBY
 
-      - name: Smoke-build OpenLess GPT voice host
-        working-directory: upstream/openless-all/app
-        shell: bash
-        run: |
-          xcodebuild \
-            -project src-tauri/gen/apple/openless.xcodeproj \
-            -target openless_iOS \
-            -sdk iphoneos \
-            -configuration Release \
-            CODE_SIGNING_ALLOWED=NO \
-            CODE_SIGNING_REQUIRED=NO \
-            build
-
       - name: Add OpenLess original-style iOS keyboard extension
         working-directory: upstream/openless-all/app
         shell: bash

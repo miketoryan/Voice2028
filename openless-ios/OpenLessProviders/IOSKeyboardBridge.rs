@@ -287,13 +287,13 @@ fn request_complete(data: &[u8]) -> bool {
 }
 
 fn parse_request(data: &[u8]) -> Result<BridgeRequest, u16> {
-    let header_end = find_bytes(data, b"\r\n\r\n").ok_or(400)?;
+    let header_end = find_bytes(data, b"\r\n\r\n").ok_or(400_u16)?;
     let header = String::from_utf8_lossy(&data[..header_end]);
     let mut lines = header.lines();
-    let request_line = lines.next().ok_or(400)?;
+    let request_line = lines.next().ok_or(400_u16)?;
     let mut parts = request_line.split_whitespace();
-    let method = parts.next().ok_or(400)?;
-    let path = parts.next().ok_or(400)?;
+    let method = parts.next().ok_or(400_u16)?;
+    let path = parts.next().ok_or(400_u16)?;
 
     let mut protocol_ok = false;
     let mut content_length = 0_usize;
@@ -328,7 +328,7 @@ fn parse_request(data: &[u8]) -> Result<BridgeRequest, u16> {
         return Err(400);
     }
 
-    serde_json::from_slice(&data[body_start..body_end]).map_err(|_| 400)
+    serde_json::from_slice(&data[body_start..body_end]).map_err(|_| 400_u16)
 }
 
 async fn write_response(

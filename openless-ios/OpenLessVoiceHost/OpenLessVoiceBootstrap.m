@@ -2,6 +2,11 @@
 #import <UIKit/UIKit.h>
 #include <stdbool.h>
 
+extern bool openless_ios_register_native_audio_callbacks(
+    bool (*start)(void),
+    void (*stop)(void)
+);
+
 static id OpenLessVoiceBootstrapShared(void) {
     Class cls = NSClassFromString(@"OpenLessVoiceBootstrap");
     if (!cls) return nil;
@@ -53,6 +58,14 @@ void OpenLessNativeAudioStop(void) {
 
 __attribute__((constructor))
 static void OpenLessVoiceBootstrapConstructor(void) {
+    // Register native capture callbacks with the Rust bridge before the
+    // keyboard can request recording. Rust exports the registration symbol,
+    // so Cargo no longer has to link against Objective-C host symbols.
+    openless_ios_register_native_audio_callbacks(
+        OpenLessNativeAudioStart,
+        OpenLessNativeAudioStop
+    );
+
     dispatch_async(dispatch_get_main_queue(), ^{
         id shared = OpenLessVoiceBootstrapShared();
 

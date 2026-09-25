@@ -447,7 +447,8 @@ jobs:
           cp "$GITHUB_WORKSPACE/adapter/openless-ios/OpenLessProviders/ChatGPTOAuthBridge.rs" "src-tauri/src/chatgpt_bridge.rs"
           cp "$GITHUB_WORKSPACE/adapter/openless-ios/OpenLessProviders/ChatGPTLoginControl.tsx" "src/pages/settings/ChatGPTLoginControl.tsx"
           python3 "$GITHUB_WORKSPACE/adapter/openless-ios/scripts/wire_gpt_login.py"
-          grep -q "openless_chatgpt_begin_login" src-tauri/gen/apple/OpenLessVoiceHost/OpenLessVoiceBootstrap.swift
+          grep -q "openless-login-request.json" src-tauri/src/chatgpt_bridge.rs
+          grep -q "consumeLoginRequestIfPresent" src-tauri/gen/apple/OpenLessVoiceHost/OpenLessVoiceBootstrap.swift
 
       - name: Add OpenLess original-style iOS keyboard extension
         working-directory: upstream/openless-all/app

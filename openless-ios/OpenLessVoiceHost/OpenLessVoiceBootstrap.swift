@@ -21,6 +21,8 @@ final class OpenLessVoiceBootstrap: NSObject {
     private var nativeAudioError: String?
 
     @objc func start() {
+        clearLegacyChatGPTLoginIfNeeded()
+
         NotificationCenter.default.addObserver(
             self,
             selector: #selector(applicationDidBecomeActive),
@@ -246,6 +248,28 @@ final class OpenLessVoiceBootstrap: NSObject {
                     ?? error.localizedDescription
                 self.writeLoginState(state: "error", message: message)
             }
+        }
+    }
+
+    private func clearLegacyChatGPTLoginIfNeeded() {
+        // Do not carry the previous VoiceKing/OpenLess OAuth session into this
+        // build. The new ChatGPTAuthManager uses a dedicated OpenLess Keychain
+        // account, so this legacy entry is safe to remove unconditionally.
+        KeychainStore.delete(account: "voiceking.chatgpt.oauth")
+
+        // If the new OpenLess login is not present, also remove the legacy
+        // exported Codex auth file. Otherwise Rust could still authenticate
+        // even though the UI correctly shows the user as signed out.
+        guard !auth.isSignedIn else { return }
+
+        do {
+            let authURL = try codexDirectory().appendingPathComponent("auth.json")
+            if FileManager.default.fileExists(atPath: authURL.path) {
+                try FileManager.default.removeItem(at: authURL)
+            }
+            writeLoginState(state: "signed_out", message: nil)
+        } catch {
+            NSLog("[OpenLess GPT] failed to clear legacy login: %@", error.localizedDescription)
         }
     }
 

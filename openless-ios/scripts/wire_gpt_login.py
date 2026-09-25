@@ -72,38 +72,52 @@ llm_new = """        {codexOAuthSelected ? (
           </div>
         ) : (
 """
-if '<ChatGPTLoginControl />' not in text:
-    if llm_old not in text:
-        raise SystemExit("LLM OAuth render block missing")
+if llm_old in text:
     text = text.replace(llm_old, llm_new, 1)
+elif "codexOAuthSelected ? (" in text:
+    llm_pos = text.find("codexOAuthSelected ? (")
+    llm_end = text.find(") : (", llm_pos)
+    llm_slice = text[llm_pos:llm_end if llm_end > llm_pos else len(text)]
+    if "<ChatGPTLoginControl />" not in llm_slice:
+        raise SystemExit("LLM OAuth branch exists but GPT login control was not inserted")
 
-asr_old = """  if (descriptor?.authRequirement === 'o_auth') {
-            return (
-              <div style={{ fontSize: 11.5, color: 'var(--ol-ink-4)', lineHeight: 1.6 }}>
-                {t('settings.providers.codexOAuthNotice')}
-              </div>
-            );
-          }
+# ASR is a separate branch. Do not infer its state from whether the LLM branch
+# already contains ChatGPTLoginControl.
+asr_marker = "if (descriptor?.authRequirement === 'o_auth') {"
+asr_pos = text.find(asr_marker, text.find("const defaultEndpoint = descriptor?.defaultEndpoint;", text.find("if (kind === 'llm')")))
+none_pos = text.find("if (descriptor?.authRequirement === 'none') {", asr_pos)
 
-"""
-asr_new = """  if (descriptor?.authRequirement === 'o_auth') {
-            return (
-              <div>
-                <ChatGPTLoginControl />
-                <div style={{ fontSize: 11.5, color: 'var(--ol-ink-4)', lineHeight: 1.6 }}>
-                  {t('settings.providers.codexOAuthNotice')}
-                </div>
-              </div>
-            );
-          }
+if asr_pos < 0 or none_pos < 0:
+    raise SystemExit("ASR OAuth branch missing")
 
-"""
-if asr_old in text:
-    text = text.replace(asr_old, asr_new, 1)
+asr_indent_start = text.rfind("\n", 0, asr_pos) + 1
+asr_indent = text[asr_indent_start:asr_pos]
+asr_new = f"""{asr_indent}if (descriptor?.authRequirement === 'o_auth') {{
+{asr_indent}  return (
+{asr_indent}    <div>
+{asr_indent}      <ChatGPTLoginControl />
+{asr_indent}      <div style={{{{ fontSize: 11.5, color: 'var(--ol-ink-4)', lineHeight: 1.6 }}}}>
+{asr_indent}        {{t('settings.providers.codexOAuthNotice')}}
+{asr_indent}      </div>
+{asr_indent}    </div>
+{asr_indent}  );
+{asr_indent}}}
+
+{asr_indent}"""
+
+text = text[:asr_indent_start] + asr_new + text[none_pos:]
 
 p.write_text(text)
 
 if "chatgpt_oauth_begin" not in Path("src-tauri/src/lib.rs").read_text():
     raise SystemExit("GPT OAuth begin command was not wired")
-if "ChatGPTLoginControl" not in p.read_text():
+final_text = p.read_text()
+if "ChatGPTLoginControl" not in final_text:
     raise SystemExit("GPT login control was not wired")
+
+asr_check_pos = final_text.find("if (descriptor?.authRequirement === 'o_auth') {", final_text.find("const defaultEndpoint = descriptor?.defaultEndpoint;", final_text.find("if (kind === 'llm')")))
+asr_none_pos = final_text.find("if (descriptor?.authRequirement === 'none') {", asr_check_pos)
+if asr_check_pos < 0 or asr_none_pos < 0:
+    raise SystemExit("ASR OAuth verification range missing")
+if "<ChatGPTLoginControl />" not in final_text[asr_check_pos:asr_none_pos]:
+    raise SystemExit("ASR GPT login control was not wired")

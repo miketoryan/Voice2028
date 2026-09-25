@@ -1,5 +1,36 @@
 import Foundation
+import SwiftUI
 import UIKit
+
+@MainActor
+private final class OpenLessURLLauncher: ObservableObject {
+    struct Request: Equatable {
+        let id = UUID()
+        let url: URL
+    }
+
+    @Published var request: Request?
+
+    func open(_ url: URL) {
+        request = Request(url: url)
+    }
+}
+
+private struct OpenLessURLLauncherView: View {
+    @ObservedObject var launcher: OpenLessURLLauncher
+    @Environment(\.openURL) private var openURL
+
+    var body: some View {
+        Color.clear
+            .frame(width: 1, height: 1)
+            .onChange(of: launcher.request) { _, request in
+                guard let request else { return }
+                openURL(request.url)
+                launcher.request = nil
+            }
+    }
+}
+
 
 private enum InputMode: Int, CaseIterable {
     case voice
@@ -178,6 +209,8 @@ final class KeyboardViewController: UIInputViewController {
     private var clipboardHistory: [String] = []
     private var voiceState = "idle"
     private let voiceBridge = LocalBridgeClient()
+    private let urlLauncher = OpenLessURLLauncher()
+    private var urlLauncherHost: UIHostingController<OpenLessURLLauncherView>?
     private var bridgeState = BridgeState.unavailable()
     private var currentVoiceRequestID: String?
     private var heartbeatTask: Task<Void, Never>?
@@ -203,6 +236,7 @@ final class KeyboardViewController: UIInputViewController {
         StrokeRepository.shared.preload()
         restorePreferences()
         installSwipeGestures()
+        installURLLauncher()
         rebuild()
     }
 
@@ -221,6 +255,26 @@ final class KeyboardViewController: UIInputViewController {
         heartbeatTask?.cancel()
         pollingTask?.cancel()
         commandTask?.cancel()
+    }
+
+    private func installURLLauncher() {
+        let host = UIHostingController(
+            rootView: OpenLessURLLauncherView(launcher: urlLauncher)
+        )
+        addChild(host)
+        host.view.backgroundColor = .clear
+        host.view.isUserInteractionEnabled = false
+        host.view.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(host.view)
+        host.didMove(toParent: self)
+        urlLauncherHost = host
+
+        NSLayoutConstraint.activate([
+            host.view.widthAnchor.constraint(equalToConstant: 1),
+            host.view.heightAnchor.constraint(equalToConstant: 1),
+            host.view.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            host.view.bottomAnchor.constraint(equalTo: view.bottomAnchor)
+        ])
     }
 
     private var isDark: Bool {
@@ -293,7 +347,10 @@ final class KeyboardViewController: UIInputViewController {
     }
 
     private func rebuild() {
-        view.subviews.forEach { $0.removeFromSuperview() }
+        let launcherView = urlLauncherHost?.view
+        view.subviews
+            .filter { $0 !== launcherView }
+            .forEach { $0.removeFromSuperview() }
         view.backgroundColor = panelBackground
 
         let root = UIStackView()
@@ -476,7 +533,7 @@ final class KeyboardViewController: UIInputViewController {
         case "opening":
             return "正在连接 OpenLess 主程序…"
         default:
-            return bridgeState.serviceReady ? "GPT 语音识别已就绪" : "请先打开 OpenLess 登录 ChatGPT"
+            return bridgeState.serviceReady ? "GPT 语音识别已就绪" : "请先打开 OpenLess 主程序"
         }
     }
 
@@ -507,9 +564,15 @@ final class KeyboardViewController: UIInputViewController {
         }
 
         guard bridgeState.serviceReady else {
+            let requestID = UUID().uuidString
+            currentVoiceRequestID = requestID
+            lastInsertedRequestID = nil
             voiceState = "opening"
             rebuild()
-            openHost(action: "login")
+            openHostForRecording(
+                requestID: requestID,
+                mode: selectedTranscriptionMode
+            )
             return
         }
 
@@ -593,7 +656,12 @@ final class KeyboardViewController: UIInputViewController {
                 if action == .startRecording {
                     self.voiceState = "opening"
                     self.rebuild()
-                    self.openHost(action: "wake")
+                    if let requestID {
+                        self.openHostForRecording(
+                            requestID: requestID,
+                            mode: mode ?? self.selectedTranscriptionMode
+                        )
+                    }
                 }
             }
         }
@@ -653,9 +721,44 @@ final class KeyboardViewController: UIInputViewController {
         }
     }
 
-    private func openHost(action: String) {
-        guard let url = URL(string: "openless://keyboard?action=\(action)") else { return }
-        extensionContext?.open(url, completionHandler: nil)
+    private func openHostForRecording(
+        requestID: String,
+        mode: TranscriptionMode
+    ) {
+        var components = URLComponents()
+        components.scheme = "openless"
+        components.host = "keyboard"
+        components.queryItems = [
+            URLQueryItem(name: "action", value: "start"),
+            URLQueryItem(name: "requestID", value: requestID),
+            URLQueryItem(name: "mode", value: mode.rawValue)
+        ]
+        guard let url = components.url else { return }
+
+        // SwiftUI openURL is substantially more reliable than
+        // NSExtensionContext.open from UIInputViewController on recent iOS.
+        urlLauncher.open(url)
+
+        Task { @MainActor [weak self] in
+            do { try await Task.sleep(for: .milliseconds(600)) }
+            catch { return }
+            guard let self, self.voiceState == "opening" else { return }
+            _ = self.openURLViaResponderChain(url)
+        }
+    }
+
+    @discardableResult
+    private func openURLViaResponderChain(_ url: URL) -> Bool {
+        let selector = NSSelectorFromString("openURL:")
+        var responder: UIResponder? = self
+        while let current = responder {
+            if current.responds(to: selector) {
+                current.perform(selector, with: url)
+                return true
+            }
+            responder = current.next
+        }
+        return false
     }
 
     private func buildEnglish(into root: UIStackView) {

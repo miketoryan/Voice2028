@@ -219,25 +219,28 @@ jobs:
           # 2) Register GPT ASR in OpenLess' existing TranscriptionRouter.
           p = Path("src-tauri/src/core_adapters.rs")
           text = p.read_text()
-          anchor = '''    for provider_type in openless_core::SHARED_CLOUD_ASR_PROVIDER_TYPES {
-              transcription
-                  .register(*provider_type, Arc::clone(&production_asr))
-                  .expect("built-in ASR provider ids are non-empty");
-          }
-          '''
-          addition = anchor + '''    #[cfg(target_os = "ios")]
-          {
-              let chatgpt_asr: Arc<dyn TranscriptionEngine> =
-                  Arc::new(crate::chatgpt_asr::ChatGptOAuthTranscriptionEngine::new());
-              transcription
-                  .register(crate::chatgpt_asr::PROVIDER_ID, chatgpt_asr)
-                  .expect("ChatGPT OAuth ASR provider id is non-empty");
-          }
-          '''
           if 'ChatGptOAuthTranscriptionEngine::new()' not in text:
-              if anchor not in text:
-                  raise SystemExit("core_adapters ASR registration anchor missing")
-              text = text.replace(anchor, addition, 1)
+              loop_pos = text.find("for provider_type in openless_core::SHARED_CLOUD_ASR_PROVIDER_TYPES")
+              if loop_pos < 0:
+                  raise SystemExit("core_adapters ASR registration loop missing")
+              end_marker = '.expect("built-in ASR provider ids are non-empty");'
+              marker_pos = text.find(end_marker, loop_pos)
+              if marker_pos < 0:
+                  raise SystemExit("core_adapters ASR registration terminator missing")
+              close_pos = text.find("\n    }", marker_pos + len(end_marker))
+              if close_pos < 0:
+                  raise SystemExit("core_adapters ASR registration closing brace missing")
+              insert_pos = close_pos + len("\n    }")
+              addition = '''
+              #[cfg(target_os = "ios")]
+              {
+                  let chatgpt_asr: Arc<dyn TranscriptionEngine> =
+                      Arc::new(crate::chatgpt_asr::ChatGptOAuthTranscriptionEngine::new());
+                  transcription
+                      .register(crate::chatgpt_asr::PROVIDER_ID, chatgpt_asr)
+                      .expect("ChatGPT OAuth ASR provider id is non-empty");
+              }'''
+              text = text[:insert_pos] + addition + text[insert_pos:]
           p.write_text(text)
 
           # 3) Add GPT ASR to Core provider descriptors and relabel Codex OAuth

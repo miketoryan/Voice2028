@@ -347,10 +347,13 @@ final class KeyboardViewController: UIInputViewController {
     }
 
     private func rebuild() {
-        let launcherView = urlLauncherHost?.view
-        view.subviews
-            .filter { $0 !== launcherView }
-            .forEach { $0.removeFromSuperview() }
+        if let launcherView = urlLauncherHost?.view {
+            view.subviews
+                .filter { $0 !== launcherView }
+                .forEach { $0.removeFromSuperview() }
+        } else {
+            view.subviews.forEach { $0.removeFromSuperview() }
+        }
         view.backgroundColor = panelBackground
 
         let root = UIStackView()
@@ -437,7 +440,14 @@ final class KeyboardViewController: UIInputViewController {
     }
 
     @objc private func openHostApp() {
-        openHost(action: "settings")
+        guard let url = URL(string: "openless://keyboard?action=settings") else { return }
+        urlLauncher.open(url)
+        Task { @MainActor [weak self] in
+            do { try await Task.sleep(for: .milliseconds(600)) }
+            catch { return }
+            guard let self else { return }
+            _ = self.openURLViaResponderChain(url)
+        }
     }
 
     private func buildVoice(into root: UIStackView) {

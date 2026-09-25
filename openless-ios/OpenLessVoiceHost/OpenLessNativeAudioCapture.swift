@@ -14,18 +14,29 @@ final class OpenLessNativeAudioCapture: @unchecked Sendable {
     private var converter: AVAudioConverter?
     private var outputFormat: AVAudioFormat?
     private var tapInstalled = false
+    private var forwardingPCM = false
 
     init(engine: AVAudioEngine) {
         self.engine = engine
     }
 
-    var isCapturing: Bool {
+    var isArmed: Bool {
         lock.lock()
         defer { lock.unlock() }
         return tapInstalled
     }
 
-    func start() throws {
+    var isCapturing: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return tapInstalled && forwardingPCM
+    }
+
+    /// Arm the input graph while the host app is in the foreground. iOS may
+    /// reject creation of a new recording input after the app has already
+    /// moved to the background, so the tap is installed once here and kept
+    /// alive. Keyboard presses later only toggle PCM forwarding.
+    func arm() throws {
         lock.lock()
         defer { lock.unlock() }
         guard !tapInstalled else { return }
@@ -46,23 +57,37 @@ final class OpenLessNativeAudioCapture: @unchecked Sendable {
 
         self.converter = converter
         outputFormat = speechFormat
+        forwardingPCM = false
         input.installTap(onBus: 0, bufferSize: 1_024, format: inputFormat) { [weak self] buffer, _ in
             self?.consume(buffer)
         }
         tapInstalled = true
     }
 
+    func start() throws {
+        lock.lock()
+        defer { lock.unlock() }
+        guard tapInstalled else { throw CaptureError.notArmed }
+        forwardingPCM = true
+    }
+
     func stop() {
         lock.lock()
+        forwardingPCM = false
+        lock.unlock()
+    }
+
+    func disarm() {
+        lock.lock()
         guard tapInstalled else {
+            forwardingPCM = false
             lock.unlock()
             return
         }
+        forwardingPCM = false
         tapInstalled = false
         lock.unlock()
 
-        // Core Audio may drain its callback while removing a tap. Do not hold
-        // the callback lock during that operation.
         engine.inputNode.removeTap(onBus: 0)
 
         lock.lock()
@@ -76,6 +101,7 @@ final class OpenLessNativeAudioCapture: @unchecked Sendable {
         defer { lock.unlock() }
 
         guard tapInstalled,
+              forwardingPCM,
               let converter,
               let outputFormat else { return }
 
@@ -113,6 +139,7 @@ final class OpenLessNativeAudioCapture: @unchecked Sendable {
     enum CaptureError: LocalizedError {
         case noInput
         case converterUnavailable
+        case notArmed
 
         var errorDescription: String? {
             switch self {
@@ -120,6 +147,8 @@ final class OpenLessNativeAudioCapture: @unchecked Sendable {
                 return "OpenLess could not access the microphone input."
             case .converterUnavailable:
                 return "OpenLess could not prepare 16 kHz speech audio."
+            case .notArmed:
+                return "OpenLess microphone input is not armed. Open the main app once before using the keyboard."
             }
         }
     }

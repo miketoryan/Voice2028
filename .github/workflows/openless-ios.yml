@@ -1,6 +1,10 @@
 name: Build OpenLess iOS unsigned IPA
 # OpenLess iOS keyboard adapter revision: 2
 
+concurrency:
+  group: openless-ios-${{ github.ref }}
+  cancel-in-progress: true
+
 on:
   push:
     branches:

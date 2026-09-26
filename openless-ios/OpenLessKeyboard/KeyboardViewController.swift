@@ -519,6 +519,8 @@ final class KeyboardViewController: UIInputViewController {
         let requestID = UUID().uuidString
         currentVoiceRequestID = requestID
         lastInsertedRequestID = nil
+        insertionAttemptedRequestID = nil
+        insertionStatusText = nil
         voiceState = "opening"
         rebuild()
         sendVoiceCommand(

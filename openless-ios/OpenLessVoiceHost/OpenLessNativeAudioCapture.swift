@@ -15,6 +15,7 @@ final class OpenLessNativeAudioCapture: @unchecked Sendable {
     private var outputFormat: AVAudioFormat?
     private var tapInstalled = false
     private var forwardingPCM = false
+    private var firstInputFrameWaiter: DispatchSemaphore?
 
     init(engine: AVAudioEngine) {
         self.engine = engine
@@ -65,15 +66,42 @@ final class OpenLessNativeAudioCapture: @unchecked Sendable {
     }
 
     func start() throws {
+        let waiter = DispatchSemaphore(value: 0)
+
         lock.lock()
-        defer { lock.unlock() }
-        guard tapInstalled else { throw CaptureError.notArmed }
+        guard tapInstalled else {
+            lock.unlock()
+            throw CaptureError.notArmed
+        }
         forwardingPCM = true
+        firstInputFrameWaiter = waiter
+        lock.unlock()
+
+        // Do not report "recording" just because the input tap was installed.
+        // Confirm that AVAudioEngine is delivering a fresh input buffer after
+        // PCM forwarding is enabled. This catches an armed engine that is no
+        // longer producing microphone callbacks.
+        guard waiter.wait(timeout: .now() + .seconds(1)) == .success else {
+            lock.lock()
+            if firstInputFrameWaiter === waiter {
+                firstInputFrameWaiter = nil
+                forwardingPCM = false
+            }
+            lock.unlock()
+            throw CaptureError.inputUnavailable
+        }
+
+        lock.lock()
+        if firstInputFrameWaiter === waiter {
+            firstInputFrameWaiter = nil
+        }
+        lock.unlock()
     }
 
     func stop() {
         lock.lock()
         forwardingPCM = false
+        firstInputFrameWaiter = nil
         lock.unlock()
     }
 
@@ -85,6 +113,7 @@ final class OpenLessNativeAudioCapture: @unchecked Sendable {
             return
         }
         forwardingPCM = false
+        firstInputFrameWaiter = nil
         tapInstalled = false
         lock.unlock()
 
@@ -100,8 +129,12 @@ final class OpenLessNativeAudioCapture: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
 
-        guard tapInstalled,
-              forwardingPCM,
+        guard tapInstalled else { return }
+        if let waiter = firstInputFrameWaiter {
+            firstInputFrameWaiter = nil
+            waiter.signal()
+        }
+        guard forwardingPCM,
               let converter,
               let outputFormat else { return }
 
@@ -140,6 +173,7 @@ final class OpenLessNativeAudioCapture: @unchecked Sendable {
         case noInput
         case converterUnavailable
         case notArmed
+        case inputUnavailable
 
         var errorDescription: String? {
             switch self {
@@ -149,6 +183,8 @@ final class OpenLessNativeAudioCapture: @unchecked Sendable {
                 return "OpenLess could not prepare 16 kHz speech audio."
             case .notArmed:
                 return "OpenLess microphone input is not armed. Open the main app once before using the keyboard."
+            case .inputUnavailable:
+                return "OpenLess microphone input did not deliver audio. Reopen the main app and try again."
             }
         }
     }

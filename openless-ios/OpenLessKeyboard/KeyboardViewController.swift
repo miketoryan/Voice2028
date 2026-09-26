@@ -184,6 +184,9 @@ final class KeyboardViewController: UIInputViewController {
     private var pollingTask: Task<Void, Never>?
     private var commandTask: Task<Void, Never>?
     private var lastInsertedRequestID: String?
+    private var insertionInFlightRequestID: String?
+    private var insertionAttemptedRequestID: String?
+    private var insertionStatusText: String?
 
     private enum VoiceDefaults {
         static let transcriptionMode = "openless.gpt.transcription-mode"
@@ -460,6 +463,9 @@ final class KeyboardViewController: UIInputViewController {
     }
 
     private var voiceStatusText: String {
+        if let insertionStatusText {
+            return insertionStatusText
+        }
         if let error = bridgeState.lastError, bridgeState.status == .error {
             return error
         }
@@ -486,6 +492,8 @@ final class KeyboardViewController: UIInputViewController {
            bridgeState.isFreshResponse(for: requestID),
            let text = bridgeState.transcribedText,
            !text.isEmpty {
+            insertionAttemptedRequestID = nil
+            insertionStatusText = "正在重试插入识别结果…"
             insertVoiceResult(text, requestID: requestID)
             return
         }
@@ -609,6 +617,7 @@ final class KeyboardViewController: UIInputViewController {
             voiceState = "idle"
             if let requestID = state.requestID,
                requestID != lastInsertedRequestID,
+               requestID != insertionAttemptedRequestID,
                state.isFreshResponse(for: requestID),
                let text = state.transcribedText,
                !text.isEmpty,
@@ -636,14 +645,55 @@ final class KeyboardViewController: UIInputViewController {
     }
 
     private func insertVoiceResult(_ text: String, requestID: String) {
-        guard lastInsertedRequestID != requestID else { return }
-        textDocumentProxy.insertText(text)
-        lastInsertedRequestID = requestID
-        currentVoiceRequestID = nil
-        voiceState = "idle"
+        guard lastInsertedRequestID != requestID,
+              insertionInFlightRequestID != requestID else { return }
 
-        Task { [voiceBridge] in
-            _ = try? await voiceBridge.send(.acknowledgeResult, requestID: requestID)
+        insertionInFlightRequestID = requestID
+        insertionStatusText = "识别完成，正在写入输入框…"
+        rebuild()
+
+        let beforeContext = textDocumentProxy.documentContextBeforeInput
+        let afterContext = textDocumentProxy.documentContextAfterInput
+        let selectedText = textDocumentProxy.selectedText
+        textDocumentProxy.insertText(text)
+
+        // UITextDocumentProxy.insertText has no success return value. Wait for
+        // the host text field to reflect the edit before acknowledging the
+        // result, so a missed keyboard insertion remains available for retry.
+        Task { @MainActor [weak self] in
+            do { try await Task.sleep(for: .milliseconds(250)) }
+            catch { return }
+            guard let self,
+                  self.insertionInFlightRequestID == requestID else { return }
+
+            let observedChange =
+                self.textDocumentProxy.documentContextBeforeInput != beforeContext
+                || self.textDocumentProxy.documentContextAfterInput != afterContext
+                || self.textDocumentProxy.selectedText != selectedText
+
+            self.insertionInFlightRequestID = nil
+            if observedChange {
+                self.lastInsertedRequestID = requestID
+                self.insertionAttemptedRequestID = nil
+                self.insertionStatusText = nil
+                self.currentVoiceRequestID = nil
+                self.voiceState = "idle"
+                Task { [voiceBridge] in
+                    _ = try? await voiceBridge.send(
+                        .acknowledgeResult,
+                        requestID: requestID
+                    )
+                }
+            } else {
+                // Keep the completed bridge result. Do not auto-repeat an
+                // insertion that may have reached a host with delayed context
+                // updates; the user can inspect the field and tap to retry.
+                self.insertionAttemptedRequestID = requestID
+                self.insertionStatusText =
+                    "未确认是否插入；请检查输入框，再点麦克风重试"
+                self.voiceState = "idle"
+            }
+            self.rebuild()
         }
     }
 
